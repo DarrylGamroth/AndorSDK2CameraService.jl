@@ -1,0 +1,16 @@
+name = "AndorSDK2CameraService"
+uuid = "fde616d6-7f4b-4e2f-8ecf-0dc858f51131"
+authors = ["Darryl Gamroth <dgamroth@rubus.ca>"]
+version = "0.1.0"
+
+[deps]
+Aeron = "b850ffb1-6704-484e-996b-4710e2f097f0"
+Aeron_jll = "d964258c-d1ad-568a-aca9-3ef511f5bffd"
+Agent = "f7939a7f-2bcc-4096-952b-c44031b5533b"
+Hsm = "8e6e8f70-f28c-415d-b881-3282d03f8261"
+
+[compat]
+Aeron = "0.9.0"
+Aeron_jll = "1.47.0"
+Agent = "0.1.10"
+Hsm = "1.0.1"
