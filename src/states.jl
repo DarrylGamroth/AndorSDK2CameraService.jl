@@ -1,6 +1,8 @@
 # store the buffer, message decoder instance and a cached decoded value from the decoder, which is just a reineterpretation of the buffer
 # this would then be decode, get view, copy, decode again, store
 
+val(x::Val{T}) where {T} = T
+
 Hsm.current(sm::ControlStateMachine) = sm.current
 Hsm.current!(sm::ControlStateMachine, s::Symbol) = sm.current = s
 Hsm.source(sm::ControlStateMachine) = sm.source
@@ -106,24 +108,48 @@ end
 function Hsm.on_exit!(sm::ControlStateMachine, state::Val{Stopped})
 end
 
-# Default handler for all events in Stopped state
-@valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, Val(event::Symbol), message)
-    # @info "Default Handler Event: $event"
+# Default Handler for all events that aren't handled
+@valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, Val(event::Symbol), message)
+    @warn "Default on_event!($(val(state)), $event). Handler may allocate."
+    prop = getfield(sm.properties, event)
     if Event.format(message) == Event.Format.NOTHING
-        value = getfield(sm.properties, event)
-        send_event_response(sm, message, value)
-    else
-        _, value = message(typeof(getfield(sm.properties, event)))
-        setfield!(sm.properties, event, value)
+        send_event_response(sm, message, prop)
     end
-    return Hsm.EventHandled
+    return Hsm.EventNotHandled
 end
+
+# Default handler for all events in Stopped state, will defer to the specific handler if it exists
+# This will always allocate as the event is not known at compile time
+# @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, Val(event::Symbol), message)
+#     @warn "Default on_event!($(val(state)), $event). Handler may allocate."
+#     prop = getfield(sm.properties, event)
+#     if Event.format(message) == Event.Format.NOTHING
+#         send_event_response(sm, message, prop)
+#     else
+#         _, value = message(typeof(prop))
+#         setfield!(sm.properties, event, value)
+#     end
+#     return Hsm.EventNotHandled
+# end
+
+# A specific handler is allocation free
+# function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:EMCCDGain}, message)
+#     @info "on_event!($(val(state)), $(val(event)))"
+#     sym = val(event)
+#     prop = getfield(sm.properties, sym)
+#     if Event.format(message) == Event.Format.NOTHING
+#         send_event_response(sm, message, prop)
+#     else
+#         _, value = message(typeof(prop))
+#         setfield!(sm.properties, sym, value)
+#     end
+#     return Hsm.EventHandled
+# end
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:Play}, arg)
     if all_properties_set(sm)
-        # Apply the settings
         AndorSDK2.exposure_time!(sm.properties.ExposureTime)
-        AndorSDK2.kinetic_cycle_time!(0)
+        AndorSDK2.kinetic_cycle_time!(sm.properties.AcquisitionFrameRate)
         AndorSDK2.emccd_gain!(sm.properties.EMCCDGain)
         AndorSDK2.frame_transfer_mode!(sm.properties.FrameTransferMode)
         return Hsm.transition!(sm, Playing)
@@ -133,36 +159,122 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{
 end
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:ExposureTime}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
         value, _, _ = AndorSDK2.acquisition_timings()
+        setfield!(sm.properties, key, value)
         send_event_response(sm, message, value)
     else
-        _, value = message(Float64)
+        _, value = message(typeof(prop))
         AndorSDK2.exposure_time!(value)
+        setfield!(sm.properties, key, value)
     end
 
+    return Hsm.EventHandled
+end
+
+function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:AcquisitionFrameRate}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
+    if Event.format(message) == Event.Format.NOTHING
+        _, _, value = AndorSDK2.acquisition_timings()
+        setfield!(sm.properties, key, value)
+        send_event_response(sm, message, value)
+    else
+        _, value = message(typeof(prop))
+        AndorSDK2.kinetic_cycle_time!(value)
+        setfield!(sm.properties, key, value)
+    end
+
+    return Hsm.EventHandled
+end
+
+function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:EMCCDGain}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
+    if Event.format(message) == Event.Format.NOTHING
+        value = AndorSDK2.emccd_gain()
+        setfield!(sm.properties, key, value)
+        send_event_response(sm, message, value)
+    else
+        _, value = message(typeof(prop))
+        AndorSDK2.emccd_gain!(value)
+        setfield!(sm.properties, key, value)
+    end
     return Hsm.EventHandled
 end
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Gain}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
         value = AndorSDK2.emccd_gain()
+        setfield!(sm.properties, key, value)
         send_event_response(sm, message, value)
     else
-        _, value = message(Float64)
+        _, value = message(typeof(prop))
         AndorSDK2.emccd_gain!(value)
+        setfield!(sm.properties, key, value)
+    end
+    return Hsm.EventHandled
+end
+
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceTemperature}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
+    if Event.format(message) == Event.Format.NOTHING
+        value, _ = AndorSDK2.temperature()
+        setfield!(sm.properties, key, value)
+        send_event_response(sm, message, value)
+    else
+        Hsm.transition!(sm, Error)
     end
 
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceTemperature}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceFanMode}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
-        value, _ = AndorSDK2.temperature()
+        value = getfield(sm.properties, key)
         send_event_response(sm, message, value)
     else
-        _, value = message(Float64)
+        _, value = message(typeof(prop))
+        AndorSDK2.fan_mode!(value)
+        setfield!(sm.properties, key, value)
+    end
+
+    return Hsm.EventHandled
+end
+
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceCoolingEnabled}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
+    if Event.format(message) == Event.Format.NOTHING
+        value = AndorSDK2.cooler_on()
+        setfield!(sm.properties, key, value)
+        send_event_response(sm, message, value)
+    else
+        _, value = message(typeof(prop))
+        value ? AndorSDK2.cooler_on!() : AndorSDK2.cooler_off!()
+        setfield!(sm.properties, key, value)
+    end
+
+    return Hsm.EventHandled
+end
+
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceCoolingSetpoint}, message)
+    key = val(event)
+    prop = getfield(sm.properties, key)
+    if Event.format(message) == Event.Format.NOTHING
+        value = getfield(sm.properties, key)
+        send_event_response(sm, message, prop)
+    else
+        _, value = message(Int)
         AndorSDK2.temperature!(value)
+        setfield!(sm.properties, key, value)
     end
 
     return Hsm.EventHandled

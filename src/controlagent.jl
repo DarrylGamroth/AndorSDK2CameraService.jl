@@ -33,17 +33,23 @@ end
 # Refactor using Property
 @kwdef mutable struct Properties
     Name::String
-    SensorWidth::Union{Nothing,Int} = nothing
-    SensorHeight::Union{Nothing,Int} = nothing
-    BinningHorizontal::Union{Nothing,Int} = 1
-    BinningVertical::Union{Nothing,Int} = 1
-    OffsetX::Union{Nothing,Int} = 0
-    OffsetY::Union{Nothing,Int} = 0
-    Width::Union{Nothing,Int} = nothing
-    Height::Union{Nothing,Int} = nothing
-    ExposureTime::Union{Nothing,Float64} = nothing
-    EMCCDGain::Union{Nothing,Float64} = nothing
+    SensorWidth::Union{Nothing,Int32} = nothing
+    SensorHeight::Union{Nothing,Int32} = nothing
+    BinningHorizontal::Union{Nothing,Int32} = 1
+    BinningVertical::Union{Nothing,Int32} = 1
+    OffsetX::Union{Nothing,Int32} = 0
+    OffsetY::Union{Nothing,Int32} = 0
+    Width::Union{Nothing,Int32} = nothing
+    Height::Union{Nothing,Int32} = nothing
+    ExposureTime::Union{Nothing,Float32} = nothing
+    AcquisitionFrameRate::Union{Nothing,Float32} = nothing
+    EMCCDGain::Union{Nothing,Float32} = nothing
     FrameTransferMode::Union{Nothing,Bool} = true
+    Shutter::Union{Nothing,Int32} = 0
+    DeviceTemperature::Union{Nothing,Int32} = nothing
+    DeviceFanMode::Union{Nothing,Int32} = 2
+    DeviceCoolingEnabled::Union{Nothing,Bool} = false
+    DeviceCoolingSetpoint::Union{Nothing,Float32} = nothing
 end
 
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
@@ -257,6 +263,7 @@ function acknowledge_message(sm::ControlStateMachine, message::Event.EventMessag
     end
 end
 
+# These two functions will be combined once SpidersMessageCodecs is updated
 function on_state_changed(sm::ControlStateMachine, message::Event.EventMessage)
     timestamp = clock_gettime(uv_clock_id.REALTIME)
 
