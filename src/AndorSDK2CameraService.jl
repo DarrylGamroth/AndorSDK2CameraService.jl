@@ -1,5 +1,9 @@
 #! /usr/bin/env julia
-# module AndorSDK2CameraService
+using Revise
+
+module AndorSDK2CameraService
+using DispatchDoctor
+using AllocCheck
 
 # include("../../Hsm.jl/src/Hsm.jl")
 # include("../../Aeron.jl/src/Aeron.jl")
@@ -18,6 +22,7 @@ using SpidersMessageCodecs
 using StaticArrays
 using ThreadPinning
 using UnsafeArrays
+using ValSplit
 
 include("uvclockgetttime.jl")
 include("controlagent.jl")
@@ -34,7 +39,9 @@ ENV["PUB_DATA_STREAM_1"] = "3"
 
 ENV["BLOCK_NAME"] = "Camera"
 
-ENV["NODE_ID"] = "367"
+ENV["BLOCK_ID"] = "367"
+
+ENV["CAMERA_INDEX"] = "1"
 
 Base.exit_on_sigint(false)
 
@@ -48,7 +55,7 @@ function main(ARGS)
 
         # Start the agent
         runner = AgentRunner(BusySpinIdleStrategy(), agent)
-        Agent.start_on_thread(runner, 3)
+        Agent.start_on_thread(runner, 2)
 
         wait(runner)
     catch e
@@ -92,6 +99,10 @@ function try_claim(p, length, max_attempts=10)
         attempts -= 1
     end
 end
+end # module AndorSDK2CameraService
+
+using .AndorSDK2CameraService
+const main = AndorSDK2CameraService.main
 
 @isdefined(var"@main") ? (@main) : exit(main(ARGS))
 

@@ -1,6 +1,54 @@
+@enumx T = X PropertyAccessMode begin
+    ReadOnly
+    ReadWrite
+    WriteOnly
+end
+
+@kwdef mutable struct Property{T<:Union{AbstractArray,AbstractString,Real,Symbol}}
+    value::Union{Nothing,T} = nothing
+    isset::Bool = false
+    const access::PropertyAccessMode.X = PropertyAccessMode.ReadWrite
+    const min_value = T <: Number ? typemin(T) : nothing
+    const max_value = T <: Number ? typemax(T) : nothing
+end
+
+function Base.setproperty!(p::Property, value)
+    if p.access == PropertyAccessMode.ReadOnly
+        throw(ArgumentError("Property is read-only"))
+    end
+
+    if p.min_value !== nothing && value < p.min_value
+        throw(ArgumentError("Value $value is less than minimum value $(p.min_value)"))
+    end
+
+    if p.max_value !== nothing && value > p.max_value
+        throw(ArgumentError("Value $value is greater than maximum value $(p.max_value)"))
+    end
+
+    setfield!(p, :value, value)
+    setfield!(p, :isset, true)
+    nothing
+end
+
+# Refactor using Property
+@kwdef mutable struct Properties
+    Name::String
+    SensorWidth::Union{Nothing,Int} = nothing
+    SensorHeight::Union{Nothing,Int} = nothing
+    BinningHorizontal::Union{Nothing,Int} = 1
+    BinningVertical::Union{Nothing,Int} = 1
+    OffsetX::Union{Nothing,Int} = 0
+    OffsetY::Union{Nothing,Int} = 0
+    Width::Union{Nothing,Int} = nothing
+    Height::Union{Nothing,Int} = nothing
+    ExposureTime::Union{Nothing,Float64} = nothing
+    EMCCDGain::Union{Nothing,Float64} = nothing
+    FrameTransferMode::Union{Nothing,Bool} = true
+end
+
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     client::Aeron.Client
-    name::String
+    properties::Properties
 
     id_gen::SnowflakeId.SnowflakeIdGenerator
 
@@ -18,36 +66,55 @@ mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     control_fragment_handler::Aeron.FragmentAssembler
     input_fragment_handler::Aeron.FragmentAssembler
 
-    # State machine interface fields
-    current::Symbol
-    source::Symbol
-
     # Camera
     frame_buffer::Vector{UInt16}
 
-    start::UInt64
-    count::UInt64
+    # State variables
+    current::Hsm.StateType
+    source::Hsm.StateType
 
-    message::Event.EventMessage
+    now_ns::UInt64
+    stop::UInt64
 
-    ControlStateMachine(client, name) = new(client, name)
+    ControlStateMachine(client, name) = new(client, Properties(; Name=name))
 end
 
-Agent.name(sm::ControlStateMachine) = sm.name
+function all_properties_set(sm::ControlStateMachine)
+    return all(!isnothing(getfield(sm.properties, field)) for field in fieldnames(Properties))
+end
+
+# k = (:BinningHorizontal, :BinningVertical, :OffsetX, :Width, :OffsetY, :Height)
+
+
+# a1 = CameraProperties()
+# p1 = getproperty.(Ref(a1), k)
+
+# a2 = Dict(
+#     :SensorWidth => 128,
+#     :SensorHeight => 128,
+#     :BinningHorizontal => 1,
+#     :BinningVertical => 1,
+#     :OffsetX => 1,
+#     :Width => 128,
+#     :OffsetY => 1,
+#     :Height => 128,
+#     :ExposureTime => 0.3,
+# )
+# p2 = getindex.(Ref(a2), k)
+
+Agent.name(sm::ControlStateMachine) = sm.properties.Name
 
 function Agent.on_start(sm::ControlStateMachine)
     @info "Starting agent $(Agent.name(sm))"
     try
         Hsm.initialize!(sm)
 
-        sm.count = 0
-
         sm.sbe_position_ptr = Ref(0)
         sm.buf = zeros(UInt8, 1024)
         sm.frame_buffer = UInt16[]
 
-        node_id = parse(Int, get(ENV, "NODE_ID") do
-            error("Environment variable NODE_ID not found")
+        node_id = parse(Int, get(ENV, "BLOCK_ID") do
+            error("Environment variable BLOCK_ID not found")
         end)
 
         sm.id_gen = SnowflakeId.SnowflakeIdGenerator(node_id)
@@ -97,6 +164,32 @@ function Agent.on_start(sm::ControlStateMachine)
             push!(sm.input_streams, subscription)
             i += 1
         end
+
+        # Initialize the camera
+
+        # Default to the first camera
+        camera_index = parse(Int, get(ENV, "CAMERA_INDEX", "1"))
+
+        if camera_index > AndorSDK2.available_cameras()
+            throw(ArgumentError("Camera index $camera_index is out of range"))
+        end
+
+        AndorSDK2.current_camera!(camera_index - 1)
+
+        AndorSDK2.initialize()
+
+        sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
+        sm.properties.Width, sm.properties.Height = sm.properties.SensorWidth, sm.properties.SensorHeight
+        AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.INTERNAL)
+        AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
+        AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
+
+        # keys = (:BinningHorizontal, :BinningVertical, :OffsetX, :Width, :OffsetY, :Height)
+        # params = getindex.(Ref(sm.params), keys)
+        # AndorSDK2.image!(params...)
+
+        AndorSDK2.frame_transfer_mode!(true)
+        AndorSDK2.hss_speed!(0, 0)
     catch e
         @error "Error starting agent $(Agent.name(sm)). Exception caught:" exception = (e, catch_backtrace())
     end
@@ -131,8 +224,8 @@ end
 
 const DEFAULT_FRAGMENT_COUNT_LIMIT = 10
 function Agent.do_work(sm::ControlStateMachine)
-    sm.start = time_ns()
-    work_done = 0
+    sm.now_ns = time_ns()
+    work_count = 0
 
     # Read input from data streams until no more fragments are available
     while true
@@ -141,7 +234,7 @@ function Agent.do_work(sm::ControlStateMachine)
 
         for subscription in sm.input_streams
             fragments_read = Aeron.poll(subscription, input_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
-            work_done += fragments_read
+            work_count += fragments_read
             if fragments_read > 0
                 all_streams_empty = false
             end
@@ -152,13 +245,13 @@ function Agent.do_work(sm::ControlStateMachine)
     end
 
     # Process control messages
-    work_done += Aeron.poll(sm.control_stream, sm.control_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
+    work_count += Aeron.poll(sm.control_stream, sm.control_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
 
-    return work_done
+    return work_count
 end
 
 function acknowledge_message(sm::ControlStateMachine, message::Event.EventMessage)
-    # This should be able to use try_claim but it allocates
+    # FIXME: try_claim could be used here but it currently doesn't work
     if Hsm.current(sm) != Error
         offer(sm.status_stream, convert(AbstractArray{UInt8}, message))
     end
@@ -208,7 +301,6 @@ function control_handler(sm::ControlStateMachine, buffer, header)
 
         offset += Event.sbe_decoded_length(message) + Event.sbe_encoded_length(sbe_header)
     end
-
     nothing
 end
 
@@ -217,7 +309,6 @@ function data_handler(sm::ControlStateMachine, buffer, header)
     tag = Symbol(Tensor.tag(String, Tensor.header(message)))
 
     dispatch!(sm, tag, message)
-
     nothing
 end
 
@@ -230,9 +321,6 @@ function dispatch!(sm::ControlStateMachine, event::Hsm.EventType, message)
         if prev != Hsm.current(sm)
             on_state_changed(sm, message)
         end
-
-        stop = time_ns() - sm.start
-        @info "Dispatched event $(event) in $(Int64(stop)) ns"
 
         return handled
     catch e
@@ -260,11 +348,23 @@ end
 
 function poll_camera(sm::ControlStateMachine)
     if Hsm.current(sm) == Playing
-        status = AndorSDK2.get_status()
+        status = AndorSDK2.status()
         event = convert(Symbol, status)
         dispatch!(sm, event, nothing)
     end
-    nothing
+    return Integer(event == AndorSDK2.Status.IDLE)
+end
+
+function initialize_camera(sm::ControlStateMachine, camera_index)
+    num_cameras = AndorSDK2.available_cameras()
+
+    if camera_index > num_cameras
+        throw(ArgumentError("Camera index $camera_index is out of range"))
+    end
+
+    AndorSDK2.select_camera(camera_index - 1)
+
+    AndorSDK2.initialize()
 end
 
 include("states.jl")

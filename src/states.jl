@@ -82,19 +82,16 @@ end
 Hsm.on_initial!(sm::ControlStateMachine, ::Val{Ready}) = Hsm.transition!(sm, Stopped)
 
 function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Ready})
-    output_stream_uri = ENV["PUB_DATA_URI_1"]
-    output_stream_id = parse(Int, ENV["PUB_DATA_STREAM_1"])
+
+    output_stream_uri = get(ENV, "PUB_DATA_URI_1") do
+        error("Environment variable PUB_DATA_URI_1 not found")
+    end
+
+    output_stream_id = parse(Int, get(ENV, "PUB_DATA_STREAM_1") do
+        error("Environment variable PUB_DATA_STREAM_1 not found")
+    end)
 
     sm.output_stream = Aeron.add_publication(sm.client, output_stream_uri, output_stream_id)
-
-    AndorSDK2.initialize()
-    AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
-    AndorSDK2.image!(1, 1, 1, 128, 1, 128)
-    AndorSDK2.frame_transfer_mode!(true)
-    AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
-    AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.INTERNAL)
-    AndorSDK2.exposure_time!(0.3)
-    AndorSDK2.kinetic_cycle_time!(0)
 end
 
 function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Ready})
@@ -109,14 +106,38 @@ end
 function Hsm.on_exit!(sm::ControlStateMachine, state::Val{Stopped})
 end
 
-Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:Play}, arg) = Hsm.transition!(sm, Playing)
+# Default handler for all events in Stopped state
+@valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, Val(event::Symbol), message)
+    # @info "Default Handler Event: $event"
+    if Event.format(message) == Event.Format.NOTHING
+        value = getfield(sm.properties, event)
+        send_event_response(sm, message, value)
+    else
+        _, value = message(typeof(getfield(sm.properties, event)))
+        setfield!(sm.properties, event, value)
+    end
+    return Hsm.EventHandled
+end
+
+function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:Play}, arg)
+    if all_properties_set(sm)
+        # Apply the settings
+        AndorSDK2.exposure_time!(sm.properties.ExposureTime)
+        AndorSDK2.kinetic_cycle_time!(0)
+        AndorSDK2.emccd_gain!(sm.properties.EMCCDGain)
+        AndorSDK2.frame_transfer_mode!(sm.properties.FrameTransferMode)
+        return Hsm.transition!(sm, Playing)
+    else
+        return Hsm.EventHandled
+    end
+end
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:ExposureTime}, message)
     if Event.format(message) == Event.Format.NOTHING
         value, _, _ = AndorSDK2.acquisition_timings()
         send_event_response(sm, message, value)
     else
-        _, value = message(Int32)
+        _, value = message(Float64)
         AndorSDK2.exposure_time!(value)
     end
 
@@ -128,7 +149,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Gain
         value = AndorSDK2.emccd_gain()
         send_event_response(sm, message, value)
     else
-        _, value = message(Int32)
+        _, value = message(Float64)
         AndorSDK2.emccd_gain!(value)
     end
 
@@ -140,7 +161,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Devi
         value, _ = AndorSDK2.temperature()
         send_event_response(sm, message, value)
     else
-        _, value = message(Int32)
+        _, value = message(Float64)
         AndorSDK2.temperature!(value)
     end
 
@@ -165,16 +186,17 @@ end
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:IDLE}, arg)
     # Read the image from the camera
-    timestamp = clock_gettime(uv_clock_id.REALTIME)
-    AndorSDK2.acquired_data(sm.frame_buffer)
-    resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
-    message = Tensor.TensorMessageEncoder(sm.buf, Tensor.MessageHeader(sm.buf))
-    header = Tensor.header(message)
-    Tensor.timestampNs!(header, timestamp)
-    Tensor.correlationId!(header, next_id(sm.id_gen))
-    Tensor.tag!(String, header, Agent.name(sm))
-    message(sm.frame_buffer)
-    offer(sm.output_stream, convert(AbstractArray{UInt8}, message))
+    if AndorSDK2.acquired_data(sm.frame_buffer)
+        timestamp = clock_gettime(uv_clock_id.REALTIME)
+        resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
+        message = Tensor.TensorMessageEncoder(sm.buf, Tensor.MessageHeader(sm.buf))
+        header = Tensor.header(message)
+        Tensor.timestampNs!(header, timestamp)
+        Tensor.correlationId!(header, next_id(sm.id_gen))
+        Tensor.tag!(String, header, Agent.name(sm))
+        message(sm.frame_buffer)
+        offer(sm.output_stream, convert(AbstractArray{UInt8}, message))
+    end
     return Hsm.EventHandled
 end
 
@@ -217,6 +239,7 @@ end
 ########################
 
 function Hsm.on_entry!(sm::ControlStateMachine, state::Val{Exit})
+    @info "Exiting..."
     # Signal the AgentRunner to stop
     throw(AgentTerminationException())
 end
