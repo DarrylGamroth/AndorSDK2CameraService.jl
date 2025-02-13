@@ -1,9 +1,5 @@
 #! /usr/bin/env julia
-using Revise
-
 module AndorSDK2CameraService
-using DispatchDoctor
-using AllocCheck
 
 # include("../../Hsm.jl/src/Hsm.jl")
 # include("../../Aeron.jl/src/Aeron.jl")
@@ -13,14 +9,12 @@ using .AndorSDK2
 
 using Aeron
 using Agent
-using BenchmarkTools
 using EnumX
 using Hsm
 using SnowflakeId
 using SpidersFragmentFilters
 using SpidersMessageCodecs
 using StaticArrays
-using ThreadPinning
 using UnsafeArrays
 using ValSplit
 
