@@ -253,7 +253,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Devi
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
-        value = AndorSDK2.cooler_on()
+        value = AndorSDK2.is_cooler_on()
         setfield!(sm.properties, key, value)
         send_event_response(sm, message, value)
     else

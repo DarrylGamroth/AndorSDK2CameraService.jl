@@ -4,8 +4,12 @@ module AndorSDK2CameraService
 # include("../../Hsm.jl/src/Hsm.jl")
 # include("../../Aeron.jl/src/Aeron.jl")
 
-include("../../AndorSDK2Mock.jl/src/AndorSDK2.jl")
-using .AndorSDK2
+if Sys.islinux()
+    include("../../AndorSDK2Mock.jl/src/AndorSDK2.jl")
+    using .AndorSDK2
+else
+    using AndorSDK2
+end
 
 using Aeron
 using Agent
