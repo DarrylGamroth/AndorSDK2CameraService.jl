@@ -32,7 +32,7 @@ ENV["CONTROL_URI"] = "aeron:udp?endpoint=localhost:40123"
 ENV["CONTROL_STREAM_ID"] = "2"
 ENV["CONTROL_STREAM_FILTER"] = "Camera"
 
-ENV["PUB_DATA_URI_1"] = "aeron:udp?endpoint=localhost:40123"
+ENV["PUB_DATA_URI_1"] = "aeron:udp?endpoint=132.246.192.209:40123"
 ENV["PUB_DATA_STREAM_1"] = "3"
 
 ENV["BLOCK_NAME"] = "Camera"
@@ -52,7 +52,7 @@ function main(ARGS)
         agent = ControlStateMachine(client, ENV["BLOCK_NAME"])
 
         # Start the agent
-        runner = AgentRunner(BusySpinIdleStrategy(), agent)
+        runner = AgentRunner(BackoffIdleStrategy(), agent)
         Agent.start_on_thread(runner, 2)
 
         wait(runner)

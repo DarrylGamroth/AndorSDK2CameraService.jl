@@ -50,9 +50,7 @@ end
 
 Hsm.on_initial!(sm::ControlStateMachine, ::Val{Top}) = Hsm.transition!(sm, Ready)
 
-Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:Reset}, arg) =
-    Hsm.transition!(sm, Top) do
-    end
+Hsm.on_event!(sm::ControlStateMachine, ::Val{Top}, ::Val{:Reset}, arg) = Hsm.transition!(sm, Top)
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:State}, message)
     send_event_response(sm, message, Hsm.current(sm))
@@ -70,7 +68,7 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:GC_
     return Hsm.EventHandled
 end
 
-Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:Exit}, arg) = Hsm.transition!(sm, Exit)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{Top}, ::Val{:Exit}, arg) = Hsm.transition!(sm, Exit)
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:Table}, arg)
     # A request was made to read all the variables
@@ -96,6 +94,14 @@ function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Ready})
     sm.output_stream = Aeron.add_publication(sm.client, output_stream_uri, output_stream_id)
 end
 
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{Ready}, ::Val{:IDLE}, arg)
+    sm.properties.DeviceTemperature, _ = AndorSDK2.temperature()
+end
+
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{Ready}, ::Val{:TEMPCYCLE}, arg)
+    sm.properties.DeviceTemperature, _ = AndorSDK2.temperature()
+end
+
 function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Ready})
     close(sm.output_stream)
 end
@@ -110,10 +116,12 @@ end
 
 # Default Handler for all events that aren't handled
 @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, Val(event::Symbol), message)
-    @warn "Default on_event!($(val(state)), $event). Handler may allocate."
-    prop = getfield(sm.properties, event)
-    if Event.format(message) == Event.Format.NOTHING
-        send_event_response(sm, message, prop)
+    if event in propertynames(sm.properties)
+        @warn "Default on_event!($(val(state)), $event). Handler may allocate."
+        prop = getfield(sm.properties, event)
+        if Event.format(message) == Event.Format.NOTHING
+            send_event_response(sm, message, prop)
+        end
     end
     return Hsm.EventNotHandled
 end
@@ -148,12 +156,10 @@ end
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:Play}, arg)
     if all_properties_set(sm)
-        AndorSDK2.exposure_time!(sm.properties.ExposureTime)
-        AndorSDK2.kinetic_cycle_time!(sm.properties.AcquisitionFrameRate)
-        AndorSDK2.emccd_gain!(sm.properties.EMCCDGain)
-        AndorSDK2.frame_transfer_mode!(sm.properties.FrameTransferMode)
         return Hsm.transition!(sm, Playing)
     else
+        # For now don't transition
+        Hsm.transition(sm, Error)
         return Hsm.EventHandled
     end
 end
@@ -287,18 +293,38 @@ Hsm.on_event!(sm::ControlStateMachine, state::Val{Processing}, event::Val{:Stop}
 ########################
 
 function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Playing})
+    # TODO move this to PROCESSING
+    resize!(sm.frame_buffer, sm.properties.Width * sm.properties.Height)
+    AndorSDK2.image!(sm.properties.BinningHorizontal,
+        sm.properties.BinningVertical,
+        sm.properties.OffsetX + 1,
+        sm.properties.OffsetX + sm.properties.Width,
+        sm.properties.OffsetY + 1,
+        sm.properties.OffsetY + sm.properties.Height)
+    AndorSDK2.baseline_clamp!(true)
+    AndorSDK2.frame_transfer_mode!(sm.properties.FrameTransferMode)
+    AndorSDK2.exposure_time!(sm.properties.ExposureTime)
+    AndorSDK2.kinetic_cycle_time!(sm.properties.AcquisitionFrameRate)
+    AndorSDK2.hss_speed!(0, 0)
+    AndorSDK2.em_advanced!(false)
+    AndorSDK2.em_gain_mode!(AndorSDK2.EMGainMode.REAL)
+    AndorSDK2.emccd_gain!(sm.properties.EMCCDGain)
+    sm.properties.DeviceExposureTime, _, sm.properties.DeviceAcquisitionFrameRate = AndorSDK2.acquisition_timings()
+    sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.OPEN)
     AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.OPEN, 50, 50)
+    # But keep this
     AndorSDK2.start_acquisition()
 end
 
 function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Playing})
     AndorSDK2.abort_acquisition()
     AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.CLOSED, 50, 50)
+    sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.CLOSED)
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:IDLE}, arg)
+function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACQUIRING}, arg)
     # Read the image from the camera
-    if AndorSDK2.acquired_data(sm.frame_buffer)
+    if AndorSDK2.most_recent_image(sm.frame_buffer)
         timestamp = clock_gettime(uv_clock_id.REALTIME)
         resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
         message = Tensor.TensorMessageEncoder(sm.buf, Tensor.MessageHeader(sm.buf))
@@ -306,13 +332,13 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{
         Tensor.timestampNs!(header, timestamp)
         Tensor.correlationId!(header, next_id(sm.id_gen))
         Tensor.tag!(String, header, Agent.name(sm))
-        message(sm.frame_buffer)
+        message(reshape(sm.frame_buffer, (sm.properties.Width, sm.properties.Height)))
         offer(sm.output_stream, convert(AbstractArray{UInt8}, message))
     end
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACQUIRING}, arg)
+function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:IDLE}, arg)
     return Hsm.EventHandled
 end
 
@@ -348,10 +374,13 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{
     Hsm.transition!(sm, Error)
 end
 
+Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:Pause}, arg) = Hsm.transition(sm, Paused)
+
 ########################
 
 function Hsm.on_entry!(sm::ControlStateMachine, state::Val{Exit})
     @info "Exiting..."
+    AndorSDK2.shutdown()
     # Signal the AgentRunner to stop
     throw(AgentTerminationException())
 end

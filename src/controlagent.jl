@@ -31,25 +31,29 @@ function Base.setproperty!(p::Property, value)
 end
 
 # Refactor using Property
+# Just set the values here for now
 @kwdef mutable struct Properties
     Name::String
     SensorWidth::Union{Nothing,Int32} = nothing
     SensorHeight::Union{Nothing,Int32} = nothing
-    BinningHorizontal::Union{Nothing,Int32} = 1
-    BinningVertical::Union{Nothing,Int32} = 1
-    OffsetX::Union{Nothing,Int32} = 0
-    OffsetY::Union{Nothing,Int32} = 0
-    Width::Union{Nothing,Int32} = nothing
-    Height::Union{Nothing,Int32} = nothing
-    ExposureTime::Union{Nothing,Float32} = nothing
-    AcquisitionFrameRate::Union{Nothing,Float32} = nothing
-    EMCCDGain::Union{Nothing,Float32} = nothing
+    BinningHorizontal::Int32 = 1
+    BinningVertical::Int32 = 1
+    OffsetX::Int32 = 4
+    OffsetY::Int32 = 4
+    Width::Union{Nothing,Int32} = 118
+    Height::Union{Nothing,Int32} = 118
+    ExposureTime::Union{Nothing,Float32} = 0.02
+    DeviceExposureTime::Float32 = 0.0
+    AcquisitionFrameRate::Union{Nothing,Float32} = 1.0 # Setting to 0 so the ExposureTime
+    DeviceAcquisitionFrameRate::Float32 = 0.0 # Setting to 0 so the ExposureTime
+    EMCCDGain::Union{Nothing,Float32} = 1.0
     FrameTransferMode::Union{Nothing,Bool} = true
-    Shutter::Union{Nothing,Int32} = 0
-    DeviceTemperature::Union{Nothing,Int32} = nothing
+    Shutter::Int32 = Integer(AndorSDK2.ShutterMode.CLOSED)
+    DeviceTemperature::Int32 = 0
     DeviceFanMode::Union{Nothing,Int32} = 2
     DeviceCoolingEnabled::Union{Nothing,Bool} = false
-    DeviceCoolingSetpoint::Union{Nothing,Float32} = nothing
+    DeviceCoolingSetpoint::Union{Nothing,Float32} = -45.0
+    DeviceCoolingStatus::Int32 = 0
 end
 
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
@@ -185,7 +189,6 @@ function Agent.on_start(sm::ControlStateMachine)
         AndorSDK2.initialize()
 
         sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
-        sm.properties.Width, sm.properties.Height = sm.properties.SensorWidth, sm.properties.SensorHeight
         AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.INTERNAL)
         AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
         AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
@@ -194,8 +197,6 @@ function Agent.on_start(sm::ControlStateMachine)
         # params = getindex.(Ref(sm.params), keys)
         # AndorSDK2.image!(params...)
 
-        AndorSDK2.frame_transfer_mode!(true)
-        AndorSDK2.hss_speed!(0, 0)
     catch e
         @error "Error starting agent $(Agent.name(sm)). Exception caught:" exception = (e, catch_backtrace())
     end
@@ -253,6 +254,7 @@ function Agent.do_work(sm::ControlStateMachine)
     # Process control messages
     work_count += Aeron.poll(sm.control_stream, sm.control_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
 
+    work_count += poll_camera(sm)
     return work_count
 end
 
@@ -354,12 +356,15 @@ function Base.convert(::Type{Symbol}, status::AndorSDK2.Status.T)
 end
 
 function poll_camera(sm::ControlStateMachine)
-    if Hsm.current(sm) == Playing
-        status = AndorSDK2.status()
-        event = convert(Symbol, status)
-        dispatch!(sm, event, nothing)
-    end
-    return Integer(event == AndorSDK2.Status.IDLE)
+    status = AndorSDK2.status()
+    event = convert(Symbol, status)
+    dispatch!(sm, event, nothing)
+    # if Hsm.current(sm) == Playing
+    #     status = AndorSDK2.status()
+    #     event = convert(Symbol, status)
+    #     dispatch!(sm, event, nothing)
+    # end
+    return Integer(event == AndorSDK2.Status.ACQUIRING)
 end
 
 function initialize_camera(sm::ControlStateMachine, camera_index)
