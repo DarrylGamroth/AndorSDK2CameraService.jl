@@ -70,11 +70,19 @@ end
 
 Hsm.on_event!(sm::ControlStateMachine, ::Val{Top}, ::Val{:Exit}, arg) = Hsm.transition!(sm, Exit)
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:Table}, arg)
-    # A request was made to read all the variables
+function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:Properties}, arg)
+    # A request was made to read all the properties
     # Post all read events to the control stream which will trigger the reads
-
-    return Hsm.EventHandled
+    # This works for now but only for values that have been read from a device
+    if Event.format(message) == Event.Format.NOTHING
+        for name in propertynames(sm.properties)
+            value = getfield(sm.properties, name)
+            send_event_response(sm, message, value)
+        end
+        return Hsm.EventHandled
+    else
+        return Hsm.transition!(sm, Error)
+    end
 end
 
 ########################
@@ -156,11 +164,10 @@ end
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:Play}, arg)
     if all_properties_set(sm)
-        return Hsm.transition!(sm, Playing)
+        Hsm.transition!(sm, Playing)
     else
         # For now don't transition
-        Hsm.transition(sm, Error)
-        return Hsm.EventHandled
+        # Hsm.transition(sm, Error)
     end
 end
 
@@ -168,9 +175,7 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
-        value, _, _ = AndorSDK2.acquisition_timings()
-        setfield!(sm.properties, key, value)
-        send_event_response(sm, message, value)
+        send_event_response(sm, message, prop)
     else
         _, value = message(typeof(prop))
         AndorSDK2.exposure_time!(value)
@@ -184,9 +189,7 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
-        _, _, value = AndorSDK2.acquisition_timings()
-        setfield!(sm.properties, key, value)
-        send_event_response(sm, message, value)
+        send_event_response(sm, message, prop)
     else
         _, value = message(typeof(prop))
         AndorSDK2.kinetic_cycle_time!(value)
@@ -228,7 +231,6 @@ end
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceTemperature}, message)
     key = val(event)
-    prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
         value, _ = AndorSDK2.temperature()
         setfield!(sm.properties, key, value)
@@ -244,8 +246,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Devi
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
-        value = getfield(sm.properties, key)
-        send_event_response(sm, message, value)
+        send_event_response(sm, message, prop)
     else
         _, value = message(typeof(prop))
         AndorSDK2.fan_mode!(value)
@@ -288,12 +289,7 @@ end
 
 ########################
 
-Hsm.on_event!(sm::ControlStateMachine, state::Val{Processing}, event::Val{:Stop}, arg) = Hsm.transition!(sm, Stopped)
-
-########################
-
-function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Playing})
-    # TODO move this to PROCESSING
+function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Processing})
     resize!(sm.frame_buffer, sm.properties.Width * sm.properties.Height)
     AndorSDK2.image!(sm.properties.BinningHorizontal,
         sm.properties.BinningVertical,
@@ -312,18 +308,27 @@ function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Playing})
     sm.properties.DeviceExposureTime, _, sm.properties.DeviceAcquisitionFrameRate = AndorSDK2.acquisition_timings()
     sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.OPEN)
     AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.OPEN, 50, 50)
-    # But keep this
+end
+
+function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Processing})
+    AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.CLOSED, 50, 50)
+    sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.CLOSED)
+end
+
+Hsm.on_event!(sm::ControlStateMachine, state::Val{Processing}, event::Val{:Stop}, arg) = Hsm.transition!(sm, Stopped)
+
+########################
+
+function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Playing})
     AndorSDK2.start_acquisition()
 end
 
 function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Playing})
     AndorSDK2.abort_acquisition()
-    AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.CLOSED, 50, 50)
-    sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.CLOSED)
 end
 
 function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACQUIRING}, arg)
-    # Read the image from the camera
+    # Read the image from the camera. The image should be written directly to the SBE message
     if AndorSDK2.most_recent_image(sm.frame_buffer)
         timestamp = clock_gettime(uv_clock_id.REALTIME)
         resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
@@ -375,6 +380,10 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{
 end
 
 Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:Pause}, arg) = Hsm.transition(sm, Paused)
+
+########################
+
+Hsm.on_event!(sm::ControlStateMachine, state::Val{Paqused}, event::Val{:Play}, arg) = Hsm.transition(sm, Playing)
 
 ########################
 

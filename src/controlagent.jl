@@ -359,12 +359,8 @@ function poll_camera(sm::ControlStateMachine)
     status = AndorSDK2.status()
     event = convert(Symbol, status)
     dispatch!(sm, event, nothing)
-    # if Hsm.current(sm) == Playing
-    #     status = AndorSDK2.status()
-    #     event = convert(Symbol, status)
-    #     dispatch!(sm, event, nothing)
-    # end
-    return Integer(event == AndorSDK2.Status.ACQUIRING)
+    # No work is done in IDLE
+    return Integer(event != AndorSDK2.Status.IDLE)
 end
 
 function initialize_camera(sm::ControlStateMachine, camera_index)
