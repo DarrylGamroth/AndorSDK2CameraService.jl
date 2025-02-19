@@ -36,15 +36,15 @@ end
     Name::String
     SensorWidth::Union{Nothing,Int32} = nothing
     SensorHeight::Union{Nothing,Int32} = nothing
-    BinningHorizontal::Int32 = 1
-    BinningVertical::Int32 = 1
-    OffsetX::Int32 = 4
-    OffsetY::Int32 = 4
-    Width::Union{Nothing,Int32} = 118
-    Height::Union{Nothing,Int32} = 118
-    ExposureTime::Union{Nothing,Float32} = 0.02
+    BinningHorizontal::Int32 = parse(Int32, get(ENV, "BINNING_HORIZONTAL", "1"))
+    BinningVertical::Int32 = parse(Int32, get(ENV, "BINNING_VERTICAL", "1"))
+    OffsetX::Int32 = parse(Int32, get(ENV, "OFFSET_X", "0"))
+    OffsetY::Int32 = parse(Int32, get(ENV, "OFFSET_Y", "0"))
+    Width::Union{Nothing,Int32} = parse(Int32, get(ENV, "WIDTH", "128"))
+    Height::Union{Nothing,Int32} = parse(Int32, get(ENV, "HEIGHT", "128"))
+    ExposureTime::Union{Nothing,Float32} = parse(Float32, get(ENV, "EXPOSURE_TIME", "0.02"))
     DeviceExposureTime::Float32 = 0.0
-    AcquisitionFrameRate::Union{Nothing,Float32} = 1.0 # Setting to 0 so the ExposureTime
+    AcquisitionFrameRate::Union{Nothing,Float32} = 0.0 # Setting to 0 so the ExposureTime
     DeviceAcquisitionFrameRate::Float32 = 0.0 # Setting to 0 so the ExposureTime
     EMCCDGain::Union{Nothing,Float32} = 1.0
     FrameTransferMode::Union{Nothing,Bool} = true
@@ -92,25 +92,6 @@ end
 function all_properties_set(sm::ControlStateMachine)
     return all(!isnothing(getfield(sm.properties, field)) for field in fieldnames(Properties))
 end
-
-# k = (:BinningHorizontal, :BinningVertical, :OffsetX, :Width, :OffsetY, :Height)
-
-
-# a1 = CameraProperties()
-# p1 = getproperty.(Ref(a1), k)
-
-# a2 = Dict(
-#     :SensorWidth => 128,
-#     :SensorHeight => 128,
-#     :BinningHorizontal => 1,
-#     :BinningVertical => 1,
-#     :OffsetX => 1,
-#     :Width => 128,
-#     :OffsetY => 1,
-#     :Height => 128,
-#     :ExposureTime => 0.3,
-# )
-# p2 = getindex.(Ref(a2), k)
 
 Agent.name(sm::ControlStateMachine) = sm.properties.Name
 
@@ -179,23 +160,7 @@ function Agent.on_start(sm::ControlStateMachine)
 
         # Default to the first camera
         camera_index = parse(Int, get(ENV, "CAMERA_INDEX", "1"))
-
-        if camera_index > AndorSDK2.available_cameras()
-            throw(ArgumentError("Camera index $camera_index is out of range"))
-        end
-
-        AndorSDK2.current_camera!(camera_index - 1)
-
-        AndorSDK2.initialize()
-
-        sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
-        AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.INTERNAL)
-        AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
-        AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
-
-        # keys = (:BinningHorizontal, :BinningVertical, :OffsetX, :Width, :OffsetY, :Height)
-        # params = getindex.(Ref(sm.params), keys)
-        # AndorSDK2.image!(params...)
+        initialize_camera(sm, camera_index)
 
     catch e
         @error "Error starting agent $(Agent.name(sm)). Exception caught:" exception = (e, catch_backtrace())
@@ -254,7 +219,9 @@ function Agent.do_work(sm::ControlStateMachine)
     # Process control messages
     work_count += Aeron.poll(sm.control_stream, sm.control_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
 
+    # Poll for camera events
     work_count += poll_camera(sm)
+
     return work_count
 end
 
@@ -296,7 +263,7 @@ function on_state_changed(sm::ControlStateMachine, message::Tensor.TensorMessage
     Aeron.offer(sm.status_stream, convert(AbstractArray{UInt8}, state_message))
 end
 
-function control_handler(sm::ControlStateMachine, buffer, header)
+function control_handler(sm::ControlStateMachine, buffer, _)
     # A single buffer may contain several Event messages. Decode each one at a time and dispatch
     offset = 0
     while offset < length(buffer)
@@ -313,7 +280,7 @@ function control_handler(sm::ControlStateMachine, buffer, header)
     nothing
 end
 
-function data_handler(sm::ControlStateMachine, buffer, header)
+function data_handler(sm::ControlStateMachine, buffer, _)
     message = Tensor.TensorMessageDecoder(buffer, sm.sbe_position_ptr, Tensor.MessageHeader(buffer))
     tag = Symbol(Tensor.tag(String, Tensor.header(message)))
 
@@ -342,37 +309,26 @@ function dispatch!(sm::ControlStateMachine, event::Hsm.EventType, message)
     end
 end
 
-function Base.convert(::Type{Symbol}, status::AndorSDK2.Status.T)
-    status == AndorSDK2.Status.IDLE ? :IDLE :
-    status == AndorSDK2.Status.TEMPCYCLE ? :TEMPCYCLE :
-    status == AndorSDK2.Status.ACQUIRING ? :ACQUIRING :
-    status == AndorSDK2.Status.ACCUM_TIME_NOT_MET ? :ACCUM_TIME_NOT_MET :
-    status == AndorSDK2.Status.KINETIC_TIME_NOT_MET ? :KINETIC_TIME_NOT_MET :
-    status == AndorSDK2.Status.ERROR_ACK ? :ERROR_ACK :
-    status == AndorSDK2.Status.ACQ_BUFFER ? :ACQ_BUFFER :
-    status == AndorSDK2.Status.ACQ_DOWNFIFO_FULL ? :ACQ_DOWNFIFO_FULL :
-    status == AndorSDK2.Status.SPOOL_ERROR ? :SPOOL_ERROR :
-    throw(ArgumentError("Unexpected status"))
-end
-
 function poll_camera(sm::ControlStateMachine)
     status = AndorSDK2.status()
-    event = convert(Symbol, status)
-    dispatch!(sm, event, nothing)
+    dispatch!(sm, Symbol(status), nothing)
     # No work is done in IDLE
-    return Integer(event != AndorSDK2.Status.IDLE)
+    return Integer(status != AndorSDK2.Status.IDLE)
 end
 
 function initialize_camera(sm::ControlStateMachine, camera_index)
-    num_cameras = AndorSDK2.available_cameras()
-
-    if camera_index > num_cameras
+    if camera_index > AndorSDK2.available_cameras()
         throw(ArgumentError("Camera index $camera_index is out of range"))
     end
 
-    AndorSDK2.select_camera(camera_index - 1)
+    AndorSDK2.current_camera!(camera_index - 1)
 
     AndorSDK2.initialize()
+
+    sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
+    AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.INTERNAL)
+    AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
+    AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
 end
 
 include("states.jl")

@@ -41,6 +41,14 @@ ENV["BLOCK_ID"] = "367"
 
 ENV["CAMERA_INDEX"] = "1"
 
+ENV["WIDTH"] = "118"
+ENV["HEIGHT"] = "118"
+ENV["OFFSET_X"] = "4"
+ENV["OFFSET_Y"] = "4"
+ENV["BINNING_HORIZONTAL"] = "1"
+ENV["BINNING_VERTICAL"] = "1"
+ENV["EXPOSURE_TIME"] = "0.02"
+
 Base.exit_on_sigint(false)
 
 function main(ARGS)
@@ -58,7 +66,7 @@ function main(ARGS)
         wait(runner)
     catch e
         if e isa TaskFailedException || e isa InterruptException
-            @info "Shutting down..."
+            @info "Shutting down..." exception = (e, catch_backtrace())
         else
             println("Error: ", e)
             @error "Exception caught:" exception = (e, catch_backtrace())

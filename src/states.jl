@@ -8,29 +8,20 @@ Hsm.current!(sm::ControlStateMachine, s::Symbol) = sm.current = s
 Hsm.source(sm::ControlStateMachine) = sm.source
 Hsm.source!(sm::ControlStateMachine, s::Symbol) = sm.source = s
 
-# Define all states
-const Top = Hsm.Root
-const Ready = :Ready
-const Processing = :Processing
-const Paused = :Paused
-const Playing = :Playing
-const Stopped = :Stopped
-const Error = :Error
-const Exit = :Exit
-
 # Implement the AbstractHsm ancestor interface for each state
-Hsm.ancestor(::ControlStateMachine, ::Val{Ready}) = Top
-Hsm.ancestor(::ControlStateMachine, ::Val{Stopped}) = Ready
-Hsm.ancestor(::ControlStateMachine, ::Val{Processing}) = Ready
-Hsm.ancestor(::ControlStateMachine, ::Val{Paused}) = Processing
-Hsm.ancestor(::ControlStateMachine, ::Val{Playing}) = Processing
-Hsm.ancestor(::ControlStateMachine, ::Val{Error}) = Top
-Hsm.ancestor(::ControlStateMachine, ::Val{Exit}) = Top
+Hsm.ancestor(::ControlStateMachine, ::Val{:Top}) = Hsm.Root
+Hsm.ancestor(::ControlStateMachine, ::Val{:Ready}) = :Top
+Hsm.ancestor(::ControlStateMachine, ::Val{:Stopped}) = :Ready
+Hsm.ancestor(::ControlStateMachine, ::Val{:Processing}) = :Ready
+Hsm.ancestor(::ControlStateMachine, ::Val{:Paused}) = :Processing
+Hsm.ancestor(::ControlStateMachine, ::Val{:Playing}) = :Processing
+Hsm.ancestor(::ControlStateMachine, ::Val{:Error}) = :Top
+Hsm.ancestor(::ControlStateMachine, ::Val{:Exit}) = :Top
 
 ########################
 using StringViews
 Base.convert(::Type{<:AbstractString}, s::Symbol) = StringView(convert(UnsafeArray{UInt8}, s))
-Base.convert(::Type{<:AbstractString}, ::Val{T}) where {T} = StringView(convert(UnsafeArray{UInt8}, T))
+Base.convert(::Type{<:AbstractString}, ::Val{:T}) where {T} = StringView(convert(UnsafeArray{UInt8}, T))
 
 function send_event_response(sm::ControlStateMachine, message::Event.EventMessage, value)
     timestamp = clock_gettime(uv_clock_id.REALTIME)
@@ -48,48 +39,57 @@ end
 
 ########################
 
-Hsm.on_initial!(sm::ControlStateMachine, ::Val{Top}) = Hsm.transition!(sm, Ready)
+Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Top}) = Hsm.transition!(sm, :Ready)
 
-Hsm.on_event!(sm::ControlStateMachine, ::Val{Top}, ::Val{:Reset}, arg) = Hsm.transition!(sm, Top)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Reset}, _) = Hsm.transition!(sm, :Top)
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:State}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, event::Val{:State}, message)
     send_event_response(sm, message, Hsm.current(sm))
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:GC}, arg)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, event::Val{:GC}, _)
     GC.gc()
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:GC_enable_logging}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, event::Val{:GC_enable_logging}, message)
     (_, value) = message(Bool)
     GC.enable_logging(value)
     return Hsm.EventHandled
 end
 
-Hsm.on_event!(sm::ControlStateMachine, ::Val{Top}, ::Val{:Exit}, arg) = Hsm.transition!(sm, Exit)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Exit}, _) = Hsm.transition!(sm, :Exit)
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, event::Val{:Properties}, arg)
-    # A request was made to read all the properties
-    # Post all read events to the control stream which will trigger the reads
-    # This works for now but only for values that have been read from a device
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Properties}, message)
+    # FIXME Post read events to the event queue for each property to be processed by the state machine
     if Event.format(message) == Event.Format.NOTHING
         for name in propertynames(sm.properties)
             value = getfield(sm.properties, name)
-            send_event_response(sm, message, value)
+
+            timestamp = clock_gettime(uv_clock_id.REALTIME)
+
+            response = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
+            header = Event.header(response)
+
+            Event.timestampNs!(header, timestamp)
+            Event.correlationId!(header, message |> Event.header |> Event.correlationId)
+            Event.tag!(header, Agent.name(sm))
+
+            response(convert(String, name), value)
+            Aeron.offer(sm.status_stream, convert(AbstractArray{UInt8}, response))
         end
         return Hsm.EventHandled
     else
-        return Hsm.transition!(sm, Error)
+        return Hsm.transition!(sm, :Error)
     end
 end
 
 ########################
 
-Hsm.on_initial!(sm::ControlStateMachine, ::Val{Ready}) = Hsm.transition!(sm, Stopped)
+Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Ready}) = Hsm.transition!(sm, :Stopped)
 
-function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Ready})
+function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Ready})
 
     output_stream_uri = get(ENV, "PUB_DATA_URI_1") do
         error("Environment variable PUB_DATA_URI_1 not found")
@@ -102,28 +102,28 @@ function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Ready})
     sm.output_stream = Aeron.add_publication(sm.client, output_stream_uri, output_stream_id)
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Ready}, ::Val{:IDLE}, arg)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Ready}, ::Val{:IDLE}, _)
     sm.properties.DeviceTemperature, _ = AndorSDK2.temperature()
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Ready}, ::Val{:TEMPCYCLE}, arg)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Ready}, ::Val{:TEMPCYCLE}, _)
     sm.properties.DeviceTemperature, _ = AndorSDK2.temperature()
 end
 
-function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Ready})
+function Hsm.on_exit!(sm::ControlStateMachine, ::Val{:Ready})
     close(sm.output_stream)
 end
 
 ########################
 
-function Hsm.on_entry!(sm::ControlStateMachine, state::Val{Stopped})
+function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Stopped})
 end
 
-function Hsm.on_exit!(sm::ControlStateMachine, state::Val{Stopped})
+function Hsm.on_exit!(sm::ControlStateMachine, ::Val{:Stopped})
 end
 
 # Default Handler for all events that aren't handled
-@valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{Top}, Val(event::Symbol), message)
+@valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Top}, Val(event::Symbol), message)
     if event in propertynames(sm.properties)
         @warn "Default on_event!($(val(state)), $event). Handler may allocate."
         prop = getfield(sm.properties, event)
@@ -136,7 +136,7 @@ end
 
 # Default handler for all events in Stopped state, will defer to the specific handler if it exists
 # This will always allocate as the event is not known at compile time
-# @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, Val(event::Symbol), message)
+# @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Stopped}, Val(event::Symbol), message)
 #     @warn "Default on_event!($(val(state)), $event). Handler may allocate."
 #     prop = getfield(sm.properties, event)
 #     if Event.format(message) == Event.Format.NOTHING
@@ -149,7 +149,7 @@ end
 # end
 
 # A specific handler is allocation free
-# function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:EMCCDGain}, message)
+# function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Stopped}, event::Val{:EMCCDGain}, message)
 #     @info "on_event!($(val(state)), $(val(event)))"
 #     sym = val(event)
 #     prop = getfield(sm.properties, sym)
@@ -162,16 +162,16 @@ end
 #     return Hsm.EventHandled
 # end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:Play}, arg)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, ::Val{:Play}, _)
     if all_properties_set(sm)
-        Hsm.transition!(sm, Playing)
+        Hsm.transition!(sm, :Playing)
     else
         # For now don't transition
-        # Hsm.transition(sm, Error)
+        # Hsm.transition(sm, :Error)
     end
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:ExposureTime}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:ExposureTime}, message)
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
@@ -185,7 +185,7 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:AcquisitionFrameRate}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:AcquisitionFrameRate}, message)
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
@@ -199,7 +199,7 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{:EMCCDGain}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:EMCCDGain}, message)
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
@@ -214,7 +214,7 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Stopped}, event::Val{
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Gain}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:Gain}, message)
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
@@ -229,20 +229,20 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Gain
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceTemperature}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:DeviceTemperature}, message)
     key = val(event)
     if Event.format(message) == Event.Format.NOTHING
         value, _ = AndorSDK2.temperature()
         setfield!(sm.properties, key, value)
         send_event_response(sm, message, value)
     else
-        Hsm.transition!(sm, Error)
+        Hsm.transition!(sm, :Error)
     end
 
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceFanMode}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:DeviceFanMode}, message)
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
@@ -256,7 +256,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Devi
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceCoolingEnabled}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:DeviceCoolingEnabled}, message)
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
@@ -272,7 +272,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:Devi
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, ::Val{Stopped}, event::Val{:DeviceCoolingSetpoint}, message)
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, event::Val{:DeviceCoolingSetpoint}, message)
     key = val(event)
     prop = getfield(sm.properties, key)
     if Event.format(message) == Event.Format.NOTHING
@@ -289,7 +289,9 @@ end
 
 ########################
 
-function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Processing})
+Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Processing}) = Hsm.transition!(sm, :Paused)
+
+function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Processing})
     resize!(sm.frame_buffer, sm.properties.Width * sm.properties.Height)
     AndorSDK2.image!(sm.properties.BinningHorizontal,
         sm.properties.BinningVertical,
@@ -308,28 +310,23 @@ function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Processing})
     sm.properties.DeviceExposureTime, _, sm.properties.DeviceAcquisitionFrameRate = AndorSDK2.acquisition_timings()
     sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.OPEN)
     AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.OPEN, 50, 50)
+    AndorSDK2.start_acquisition()
 end
 
-function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Processing})
+function Hsm.on_exit!(sm::ControlStateMachine, ::Val{:Processing})
+    AndorSDK2.abort_acquisition()
     AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.CLOSED, 50, 50)
     sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.CLOSED)
 end
 
-Hsm.on_event!(sm::ControlStateMachine, state::Val{Processing}, event::Val{:Stop}, arg) = Hsm.transition!(sm, Stopped)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Processing}, ::Val{:Stop}, _) = Hsm.transition!(sm, :Stopped)
 
 ########################
 
-function Hsm.on_entry!(sm::ControlStateMachine, ::Val{Playing})
-    AndorSDK2.start_acquisition()
-end
-
-function Hsm.on_exit!(sm::ControlStateMachine, ::Val{Playing})
-    AndorSDK2.abort_acquisition()
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACQUIRING}, arg)
-    # Read the image from the camera. The image should be written directly to the SBE message
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRING}, _)
     if AndorSDK2.most_recent_image(sm.frame_buffer)
+        # Read the image from the camera. The image should be written directly to the SBE message
+        # or sent as a vector of buffers to offer
         timestamp = clock_gettime(uv_clock_id.REALTIME)
         resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
         message = Tensor.TensorMessageEncoder(sm.buf, Tensor.MessageHeader(sm.buf))
@@ -343,51 +340,29 @@ function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{
     return Hsm.EventHandled
 end
 
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:IDLE}, arg)
-    return Hsm.EventHandled
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:TEMPCYCLE}, arg)
-    return Hsm.EventHandled
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACCUM_TIME_NOT_MET}, arg)
-    Hsm.transition!(sm, Error)
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACCUM_TIME_NOT_MET}, arg)
-    Hsm.transition!(sm, Error)
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:KINETIC_TIME_NOT_MET}, arg)
-    Hsm.transition!(sm, Error)
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ERROR_ACK}, arg)
-    Hsm.transition!(sm, Error)
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACQ_BUFFER}, arg)
-    Hsm.transition!(sm, Error)
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:ACQ_DOWNFIFO_FULL}, arg)
-    Hsm.transition!(sm, Error)
-end
-
-function Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:SPOOL_ERROR}, arg)
-    Hsm.transition!(sm, Error)
-end
-
-Hsm.on_event!(sm::ControlStateMachine, state::Val{Playing}, event::Val{:Pause}, arg) = Hsm.transition(sm, Paused)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:Pause}, _) = Hsm.transition(sm, :Paused)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:IDLE}, _) = Hsm.EventHandled
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:TEMPCYCLE}, _) = Hsm.EventHandled
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACCUM_TIME_NOT_MET}, _) = Hsm.transition!(sm, :Error)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:KINETIC_TIME_NOT_MET}, _) = Hsm.transition!(sm, :Error)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ERROR_ACK}, _) = Hsm.transition!(sm, :Error)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQ_BUFFER}, _) = Hsm.transition!(sm, :Error)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQ_DOWNFIFO_FULL}, _) = Hsm.transition!(sm, :Error)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:SPOOL_ERROR}, _) = Hsm.transition!(sm, :Error)
 
 ########################
 
-Hsm.on_event!(sm::ControlStateMachine, state::Val{Paqused}, event::Val{:Play}, arg) = Hsm.transition(sm, Playing)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:Play}, _) = Hsm.transition(sm, :Playing)
+
+function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:ACQUIRING}, _)
+    # Just consume the image
+    AndorSDK2.most_recent_image(sm.frame_buffer)
+    return Hsm.EventHandled
+end
 
 ########################
 
-function Hsm.on_entry!(sm::ControlStateMachine, state::Val{Exit})
+function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Exit})
     @info "Exiting..."
     AndorSDK2.shutdown()
     # Signal the AgentRunner to stop
@@ -396,7 +371,7 @@ end
 
 ########################
 
-function Hsm.on_entry!(sm::ControlStateMachine, state::Val{Error})
+function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Error})
     @info "Error"
 end
 
