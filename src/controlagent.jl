@@ -54,6 +54,7 @@ end
     DeviceCoolingEnabled::Union{Nothing,Bool} = false
     DeviceCoolingSetpoint::Union{Nothing,Float32} = -45.0
     DeviceCoolingStatus::Int32 = 0
+    DeviceVerticalShiftSpeed::Float32 = 0.0
 end
 
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
@@ -328,7 +329,7 @@ function initialize_camera(sm::ControlStateMachine, camera_index)
     AndorSDK2.initialize()
 
     sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
-    AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.INTERNAL)
+    AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.EXTERNAL)
     AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
     AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
 end

@@ -41,19 +41,21 @@ ENV["BLOCK_ID"] = "367"
 
 ENV["CAMERA_INDEX"] = "1"
 
-ENV["WIDTH"] = "118"
-ENV["HEIGHT"] = "118"
-ENV["OFFSET_X"] = "4"
-ENV["OFFSET_Y"] = "4"
+ENV["WIDTH"] = "128"
+ENV["HEIGHT"] = "128"
+ENV["OFFSET_X"] = "0"
+ENV["OFFSET_Y"] = "0"
 ENV["BINNING_HORIZONTAL"] = "1"
 ENV["BINNING_VERTICAL"] = "1"
-ENV["EXPOSURE_TIME"] = "0.02"
+ENV["EXPOSURE_TIME"] = "0.0039"
 
 Base.exit_on_sigint(false)
 
 function main(ARGS)
-    # Initialize Aeron
+    md = Aeron.MediaDriver.launch()
+
     try
+        # Initialize Aeron
         client = Aeron.Client()
 
         # Initialize the agent
@@ -71,6 +73,8 @@ function main(ARGS)
             println("Error: ", e)
             @error "Exception caught:" exception = (e, catch_backtrace())
         end
+    finally
+        close(md)
     end
 
     return 0
