@@ -21,7 +21,7 @@ Hsm.ancestor(::ControlStateMachine, ::Val{:Exit}) = :Top
 ########################
 using StringViews
 Base.convert(::Type{<:AbstractString}, s::Symbol) = StringView(convert(UnsafeArray{UInt8}, s))
-Base.convert(::Type{<:AbstractString}, ::Val{:T}) where {T} = StringView(convert(UnsafeArray{UInt8}, T))
+Base.convert(::Type{<:AbstractString}, ::Val{T}) where {T} = StringView(convert(UnsafeArray{UInt8}, T))
 
 function send_event_response(sm::ControlStateMachine, message::Event.EventMessage, value)
     timestamp = clock_gettime(uv_clock_id.REALTIME)
@@ -39,7 +39,11 @@ end
 
 ########################
 
-Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Top}) = Hsm.transition!(sm, :Ready)
+Hsm.on_initial!(sm::ControlStateMachine, ::Val{Hsm.Root}) = Hsm.transition!(sm, :Top)
+
+########################
+
+Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Top}) = Hsm.transition!(sm, :Playing)
 
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Reset}, _) = Hsm.transition!(sm, :Top)
 
@@ -167,7 +171,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, ::Val{:Play}, _
         Hsm.transition!(sm, :Playing)
     else
         # For now don't transition
-        # Hsm.transition(sm, :Error)
+        # Hsm.transition!(sm, :Error)
     end
 end
 
@@ -340,7 +344,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRIN
     return Hsm.EventHandled
 end
 
-Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:Pause}, _) = Hsm.transition(sm, :Paused)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:Pause}, _) = Hsm.transition!(sm, :Paused)
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:IDLE}, _) = Hsm.EventHandled
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:TEMPCYCLE}, _) = Hsm.EventHandled
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACCUM_TIME_NOT_MET}, _) = Hsm.transition!(sm, :Error)
@@ -352,7 +356,7 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:SPOOL_ERROR}, _) 
 
 ########################
 
-Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:Play}, _) = Hsm.transition(sm, :Playing)
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:Play}, _) = Hsm.transition!(sm, :Playing)
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:ACQUIRING}, _)
     # Just consume the image

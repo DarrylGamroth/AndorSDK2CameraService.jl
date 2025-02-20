@@ -98,8 +98,6 @@ Agent.name(sm::ControlStateMachine) = sm.properties.Name
 function Agent.on_start(sm::ControlStateMachine)
     @info "Starting agent $(Agent.name(sm))"
     try
-        Hsm.initialize!(sm)
-
         sm.sbe_position_ptr = Ref(0)
         sm.buf = zeros(UInt8, 1024)
         sm.frame_buffer = UInt16[]
@@ -161,6 +159,8 @@ function Agent.on_start(sm::ControlStateMachine)
         # Default to the first camera
         camera_index = parse(Int, get(ENV, "CAMERA_INDEX", "1"))
         initialize_camera(sm, camera_index)
+
+        Hsm.initialize!(sm)
 
     catch e
         @error "Error starting agent $(Agent.name(sm)). Exception caught:" exception = (e, catch_backtrace())
@@ -225,9 +225,11 @@ function Agent.do_work(sm::ControlStateMachine)
     return work_count
 end
 
+# FIXME This might need to be rethought. Sending a empty message will perform a read
+# and send a reply, this is a write event acknowledgement
 function acknowledge_message(sm::ControlStateMachine, message::Event.EventMessage)
     # FIXME: try_claim could be used here but it currently doesn't work
-    if Hsm.current(sm) != Error
+    if Hsm.current(sm) != :Error
         offer(sm.status_stream, convert(AbstractArray{UInt8}, message))
     end
 end
