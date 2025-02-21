@@ -140,6 +140,8 @@ end
             setfield!(sm.properties, event, value)
             # send_event_response(sm, message, prop)
         end
+        return Hsm.EventHandled
+    end
     return Hsm.EventNotHandled
 end
 
