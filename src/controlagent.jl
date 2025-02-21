@@ -66,7 +66,7 @@ end
 
     PreAmpGainIndex::Int = 0
     VerticalShiftSpeedIndex::Int = 0
-    VerticalClockVoltageAmplitudeIndex::Int = 0
+    VerticalShiftAmplitudeIndex::Int = 0
 end
 
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
@@ -344,7 +344,7 @@ function initialize_camera(sm::ControlStateMachine, camera_index)
     AndorSDK2.initialize()
 
     sm.properties.DeviceModelName = AndorSDK2.head_model()
-    sm.properties.DeviceSerialNumber = String(AndorSDK2.camera_serial_number())
+    sm.properties.DeviceSerialNumber = string(AndorSDK2.camera_serial_number())
     sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
     AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.EXTERNAL)
     AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)

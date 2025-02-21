@@ -247,7 +247,7 @@ function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Processing})
     AndorSDK2.emccd_gain!(sm.properties.EMCCDGain)
     AndorSDK2.pre_amp_gain!(sm.properties.PreAmpGainIndex)
     AndorSDK2.vss_speed!(sm.properties.VerticalShiftSpeedIndex)
-    AndorSDK2.vs_amplitude!(sm.properties.VerticalClockVoltageAmplitudeIndex)
+    AndorSDK2.vs_amplitude!(sm.properties.VerticalShiftAmplitudeIndex)
 
     # Read the current values from the camera
     sm.properties.HorizontalShiftSpeed = AndorSDK2.hss_speed(0, 0, 0)
