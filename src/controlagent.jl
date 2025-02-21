@@ -34,28 +34,39 @@ end
 # Just set the values here for now
 @kwdef mutable struct Properties
     Name::String
-    SensorWidth::Union{Nothing,Int32} = nothing
-    SensorHeight::Union{Nothing,Int32} = nothing
-    BinningHorizontal::Int32 = parse(Int32, get(ENV, "BINNING_HORIZONTAL", "1"))
-    BinningVertical::Int32 = parse(Int32, get(ENV, "BINNING_VERTICAL", "1"))
-    OffsetX::Int32 = parse(Int32, get(ENV, "OFFSET_X", "0"))
-    OffsetY::Int32 = parse(Int32, get(ENV, "OFFSET_Y", "0"))
-    Width::Union{Nothing,Int32} = parse(Int32, get(ENV, "WIDTH", "128"))
-    Height::Union{Nothing,Int32} = parse(Int32, get(ENV, "HEIGHT", "128"))
+    SensorWidth::Union{Nothing,Int} = nothing
+    SensorHeight::Union{Nothing,Int} = nothing
+    BinningHorizontal::Int = parse(Int, get(ENV, "BINNING_HORIZONTAL", "1"))
+    BinningVertical::Int = parse(Int, get(ENV, "BINNING_VERTICAL", "1"))
+    OffsetX::Int = parse(Int, get(ENV, "OFFSET_X", "0"))
+    OffsetY::Int = parse(Int, get(ENV, "OFFSET_Y", "0"))
+    Width::Union{Nothing,Int} = parse(Int, get(ENV, "WIDTH", "128"))
+    Height::Union{Nothing,Int} = parse(Int, get(ENV, "HEIGHT", "128"))
     ExposureTime::Union{Nothing,Float64} = parse(Float64, get(ENV, "EXPOSURE_TIME", "0.02"))
-    DeviceExposureTime::Float32 = 0.0
-    AcquisitionFrameRate::Union{Nothing,Float32} = 0.0 # Setting to 0 so the ExposureTime
-    DeviceAcquisitionFrameRate::Float32 = 0.0 # Setting to 0 so the ExposureTime
-    EMCCDGain::Union{Nothing,Float32} = 1.0
-    FrameTransferMode::Union{Nothing,Bool} = true
-    Shutter::Int32 = Integer(AndorSDK2.ShutterMode.CLOSED)
-    DeviceTemperature::Int32 = 0
-    DeviceFanMode::Union{Nothing,Int32} = 2
-    DeviceCoolingEnabled::Union{Nothing,Bool} = false
-    DeviceCoolingSetpoint::Union{Nothing,Float32} = -45.0
-    DeviceCoolingStatus::Int32 = 0
+    AcquisitionFrameRate::Union{Nothing,Float64} = 0.0 # Setting to 0 so the ExposureTime
+
+    Shutter::Int = Integer(AndorSDK2.ShutterMode.CLOSED)
+
+    DeviceAcquisitionFrameRate::Float64 = 0.0
+    DeviceCoolingEnable::Bool = false
+    DeviceCoolingSetpoint::Float64 = -45.0
+    DeviceCoolingStatus::Int = 0
+    DeviceExposureTime::Float64 = 0.0
+    DeviceFanMode::Int = 2
+    DeviceModelName::Union{Nothing,AbstractString} = nothing
+    DeviceSerialNumber::Union{Nothing,AbstractString} = nothing
+    DeviceTemperature::Int = 0
+
+    EMCCDGain::Union{Nothing,Float64} = 1.0
+    EMAdvanced::Bool = false
+    FastExternalTrigger::Bool = false
+    FrameTransferMode::Bool = true
+    HorizontalShiftSpeed::Float64 = 0.0
+    VerticalShiftSpeed::Float64 = 0.0
+
+    PreAmpGainIndex::Int = 0
     VerticalShiftSpeedIndex::Int = 0
-    DeviceVerticalShiftSpeed::Float32 = 0.0
+    VerticalClockVoltageAmplitudeIndex::Int = 0
 end
 
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
@@ -85,14 +96,15 @@ mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     current::Hsm.StateType
     source::Hsm.StateType
 
-    now_ns::UInt64
-    stop::UInt64
-
     ControlStateMachine(client, name) = new(client, Properties(; Name=name))
 end
 
 function all_properties_set(sm::ControlStateMachine)
     return all(!isnothing(getfield(sm.properties, field)) for field in fieldnames(Properties))
+end
+
+function property_type(sm::ControlStateMachine, property)
+    return typeof(getfield(sm.properties, property))
 end
 
 Agent.name(sm::ControlStateMachine) = sm.properties.Name
@@ -171,6 +183,8 @@ end
 
 function Agent.on_close(sm::ControlStateMachine)
     @info "Closing agent $(Agent.name(sm))"
+    AndorSDK2.shutdown()
+
     close(sm.status_stream)
     close(sm.control_stream)
     for (subscription, _) in sm.input_streams
@@ -198,7 +212,6 @@ end
 
 const DEFAULT_FRAGMENT_COUNT_LIMIT = 10
 function Agent.do_work(sm::ControlStateMachine)
-    sm.now_ns = time_ns()
     work_count = 0
 
     # Read input from data streams until no more fragments are available
@@ -309,6 +322,7 @@ function dispatch!(sm::ControlStateMachine, event::Hsm.EventType, message)
         end
 
         @error "Error in dispatch" exception = (e, catch_backtrace())
+        # FIXME The error should be saved in the state machine
         Hsm.transition!(sm, :Error)
     end
 end
@@ -329,10 +343,13 @@ function initialize_camera(sm::ControlStateMachine, camera_index)
 
     AndorSDK2.initialize()
 
+    sm.properties.DeviceModelName = AndorSDK2.head_model()
+    sm.properties.DeviceSerialNumber = String(AndorSDK2.serial_number())
     sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
     AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.EXTERNAL)
     AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
     AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
+    AndorSDK2.dma_parameters!(1, 0.001)
 end
 
 include("states.jl")
