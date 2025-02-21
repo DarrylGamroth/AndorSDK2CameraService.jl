@@ -88,6 +88,30 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Properties},
     end
 end
 
+# Default Handler for all events that aren't handled
+@valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Top}, Val(event::Symbol), message)
+
+    # Check if the event is a property
+    if event in propertynames(sm.properties)
+        @warn "Default on_event!($(val(state)), $event). Handler may allocate."
+
+        if Event.format(message) == Event.Format.NOTHING
+            # If the message has no value, then it is a request for the current value
+            value = getfield(sm.properties, event)
+            send_event_response(sm, message, value)
+        else
+            # Otherwise it's a write request
+            _, value = message(property_type(sm, event))
+            setfield!(sm.properties, event, value)
+            # send_event_response(sm, message, prop)
+        end
+        return Hsm.EventHandled
+    end
+
+    # Defer to the specific handler if it exists
+    return Hsm.EventNotHandled
+end
+
 ########################
 
 Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Ready}) = Hsm.transition!(sm, :Stopped)
@@ -118,32 +142,6 @@ function Hsm.on_exit!(sm::ControlStateMachine, ::Val{:Ready})
 end
 
 ########################
-
-function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Stopped})
-end
-
-function Hsm.on_exit!(sm::ControlStateMachine, ::Val{:Stopped})
-end
-
-# Default Handler for all events that aren't handled
-@valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Top}, Val(event::Symbol), message)
-    if event in propertynames(sm.properties)
-        @warn "Default on_event!($(val(state)), $event). Handler may allocate."
-        prop = getfield(sm.properties, event)
-
-        if Event.format(message) == Event.Format.NOTHING
-            # If the message has no value, then it is a request for the current value
-            send_event_response(sm, message, prop)
-        else
-            # Otherwise it's a write request
-            _, value = message(typeof(prop))
-            setfield!(sm.properties, event, value)
-            # send_event_response(sm, message, prop)
-        end
-        return Hsm.EventHandled
-    end
-    return Hsm.EventNotHandled
-end
 
 # Default handler for all events in Stopped state, will defer to the specific handler if it exists
 # This will always allocate as the event is not known at compile time
@@ -288,8 +286,8 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRIN
 end
 
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:Pause}, _) = Hsm.transition!(sm, :Paused)
-Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:IDLE}, _) = Hsm.EventHandled
-Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:TEMPCYCLE}, _) = Hsm.EventHandled
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:IDLE}, _) = Hsm.EventNotHandled
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:TEMPCYCLE}, _) = Hsm.EventNotHandled
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACCUM_TIME_NOT_MET}, _) = Hsm.transition!(sm, :Error)
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:KINETIC_TIME_NOT_MET}, _) = Hsm.transition!(sm, :Error)
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ERROR_ACK}, _) = Hsm.transition!(sm, :Error)
@@ -299,13 +297,13 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:SPOOL_ERROR}, _) 
 
 ########################
 
-Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:Play}, _) = Hsm.transition!(sm, :Playing)
-
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:ACQUIRING}, _)
     # Just consume the image
     AndorSDK2.most_recent_image(sm.frame_buffer)
     return Hsm.EventHandled
 end
+
+Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:Play}, _) = Hsm.transition!(sm, :Playing)
 
 ########################
 
