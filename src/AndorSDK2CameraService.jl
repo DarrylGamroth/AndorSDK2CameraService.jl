@@ -28,7 +28,7 @@ include("controlagent.jl")
 ENV["STATUS_URI"] = "aeron:udp?endpoint=localhost:40123"
 ENV["STATUS_STREAM_ID"] = "1"
 
-ENV["CONTROL_URI"] = "aeron:udp?endpoint=localhost:40123"
+ENV["CONTROL_URI"] = "aeron:udp?endpoint=0.0.0.0:40123"
 ENV["CONTROL_STREAM_ID"] = "2"
 ENV["CONTROL_STREAM_FILTER"] = "Camera"
 
@@ -52,7 +52,7 @@ ENV["EXPOSURE_TIME"] = "0.0039"
 Base.exit_on_sigint(false)
 
 function main(ARGS)
-    md = Aeron.MediaDriver.launch()
+    # md = Aeron.MediaDriver.launch()
 
     try
         # Initialize Aeron
@@ -74,7 +74,7 @@ function main(ARGS)
             @error "Exception caught:" exception = (e, catch_backtrace())
         end
     finally
-        close(md)
+        # close(md)
     end
 
     return 0

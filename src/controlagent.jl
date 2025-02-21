@@ -42,7 +42,7 @@ end
     OffsetY::Int32 = parse(Int32, get(ENV, "OFFSET_Y", "0"))
     Width::Union{Nothing,Int32} = parse(Int32, get(ENV, "WIDTH", "128"))
     Height::Union{Nothing,Int32} = parse(Int32, get(ENV, "HEIGHT", "128"))
-    ExposureTime::Union{Nothing,Float32} = parse(Float32, get(ENV, "EXPOSURE_TIME", "0.02"))
+    ExposureTime::Union{Nothing,Float64} = parse(Float64, get(ENV, "EXPOSURE_TIME", "0.02"))
     DeviceExposureTime::Float32 = 0.0
     AcquisitionFrameRate::Union{Nothing,Float32} = 0.0 # Setting to 0 so the ExposureTime
     DeviceAcquisitionFrameRate::Float32 = 0.0 # Setting to 0 so the ExposureTime
@@ -54,6 +54,7 @@ end
     DeviceCoolingEnabled::Union{Nothing,Bool} = false
     DeviceCoolingSetpoint::Union{Nothing,Float32} = -45.0
     DeviceCoolingStatus::Int32 = 0
+    VerticalShiftSpeedIndex::Int = 0
     DeviceVerticalShiftSpeed::Float32 = 0.0
 end
 
@@ -308,7 +309,7 @@ function dispatch!(sm::ControlStateMachine, event::Hsm.EventType, message)
         end
 
         @error "Error in dispatch" exception = (e, catch_backtrace())
-        Hsm.transition!(sm, Error)
+        Hsm.transition!(sm, :Error)
     end
 end
 
