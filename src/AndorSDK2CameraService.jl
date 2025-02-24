@@ -44,6 +44,9 @@ ENV["CAMERA_INDEX"] = "1"
 
 ENV["EXPOSURE_TIME"] = "0.0039"
 
+ENV["BINNING_HORIZONTAL"] = 2
+ENV["BINNING_VERTICAL"] = 2
+
 Base.exit_on_sigint(false)
 
 function main(ARGS)

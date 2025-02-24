@@ -67,7 +67,7 @@ end
 
     PreAmpGainIndex::Int64 = 0
     VerticalShiftSpeedIndex::Int64 = 0
-    VerticalShiftAmplitudeIndex::Int64 = 0
+    VerticalShiftAmplitudeIndex::Int64 = 1
 end
 
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
@@ -97,6 +97,9 @@ mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     current::Hsm.StateType
     source::Hsm.StateType
 
+    # Frame index
+    frame_index::Clong
+
     ControlStateMachine(client, name) = new(client, Properties(; Name=name), EpochClock())
 end
 
@@ -116,6 +119,7 @@ function Agent.on_start(sm::ControlStateMachine)
     sm.sbe_position_ptr = Ref(0)
     sm.buf = zeros(UInt8, 1024)
     sm.frame_buffer = UInt16[]
+    sm.frame_index = -1
 
     node_id = parse(Int, get(ENV, "BLOCK_ID") do
         error("Environment variable BLOCK_ID not found")

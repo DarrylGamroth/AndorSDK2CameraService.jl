@@ -17,7 +17,7 @@ Hsm.ancestor(::ControlStateMachine, ::Val{:Error}) = :Top
 Hsm.ancestor(::ControlStateMachine, ::Val{:Exit}) = :Top
 
 ########################
-Base.convert(::Type{T}, ::Val{S}) where {T<:AbstractString, S} = convert(AbstractString, S)
+Base.convert(::Type{T}, ::Val{S}) where {T<:AbstractString,S} = convert(AbstractString, S)
 val(::Val{T}) where {T} = T
 
 function send_event_response(sm::ControlStateMachine, message::Event.EventMessage, value)
@@ -229,7 +229,9 @@ end
 Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Processing}) = Hsm.transition!(sm, :Paused)
 
 function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Processing})
-    resize!(sm.frame_buffer, sm.properties.Width * sm.properties.Height)
+
+    resize!(sm.frame_buffer, sm.properties.Width ÷ sm.properties.BinningHorizontal *
+                             sm.properties.Height ÷ sm.properties.BinningVertical)
     AndorSDK2.image!(sm.properties.BinningHorizontal,
         sm.properties.BinningVertical,
         sm.properties.OffsetX + 1,
@@ -273,7 +275,9 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Processing}, ::Val{:Stop}, _) = Hs
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRING}, _)
     timestamp = time_nanos(sm.clock)
-    if AndorSDK2.most_recent_image(sm.frame_buffer)
+    _, last = AndorSDK2.number_new_images()
+    if last != sm.frame_index
+        sm.frame_index, _, _ = AndorSDK2.images(last, last, sm.frame_buffer)
         # Read the image from the camera. The image should be written directly to the SBE message
         # or sent as a vector of buffers to offer
         resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
@@ -282,7 +286,9 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRIN
         Tensor.timestampNs!(header, timestamp)
         Tensor.correlationId!(header, next_id(sm.id_gen))
         Tensor.tag!(String, header, Agent.name(sm))
-        message(reshape(sm.frame_buffer, (sm.properties.Width, sm.properties.Height)))
+        message(reshape(sm.frame_buffer,
+            (sm.properties.Width ÷ sm.properties.BinningHorizontal, sm.properties.Height ÷ sm.properties.BinningVertical))
+        )
         offer(sm.output_stream, convert(AbstractArray{UInt8}, message))
     end
     return Hsm.EventHandled
@@ -302,7 +308,10 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:SPOOL_ERROR}, _) 
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:ACQUIRING}, _)
     # Just consume the image
-    AndorSDK2.most_recent_image(sm.frame_buffer)
+    _, last = AndorSDK2.number_new_images()
+    if last != sm.frame_index
+        sm.frame_index, _, _ = AndorSDK2.images(last, last, sm.frame_buffer)
+    end
     return Hsm.EventHandled
 end
 
