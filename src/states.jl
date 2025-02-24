@@ -1,8 +1,6 @@
 # store the buffer, message decoder instance and a cached decoded value from the decoder, which is just a reineterpretation of the buffer
 # this would then be decode, get view, copy, decode again, store
 
-val(x::Val{T}) where {T} = T
-
 Hsm.current(sm::ControlStateMachine) = sm.current
 Hsm.current!(sm::ControlStateMachine, s::Symbol) = sm.current = s
 Hsm.source(sm::ControlStateMachine) = sm.source
@@ -19,12 +17,11 @@ Hsm.ancestor(::ControlStateMachine, ::Val{:Error}) = :Top
 Hsm.ancestor(::ControlStateMachine, ::Val{:Exit}) = :Top
 
 ########################
-using StringViews
-Base.convert(::Type{<:AbstractString}, s::Symbol) = StringView(convert(UnsafeArray{UInt8}, s))
-Base.convert(::Type{<:AbstractString}, ::Val{T}) where {T} = StringView(convert(UnsafeArray{UInt8}, T))
+Base.convert(::Type{T}, ::Val{S}) where {T<:AbstractString, S} = convert(AbstractString, S)
+val(::Val{T}) where {T} = T
 
 function send_event_response(sm::ControlStateMachine, message::Event.EventMessage, value)
-    timestamp = clock_gettime(uv_clock_id.REALTIME)
+    timestamp = time_nanos(sm.clock)
 
     response = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
     header = Event.header(response)
@@ -69,7 +66,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Properties},
     # FIXME Post read events to the event queue for each property to be processed by the state machine
     if Event.format(message) == Event.Format.NOTHING
         for name in propertynames(sm.properties)
-            timestamp = clock_gettime(uv_clock_id.REALTIME)
+            timestamp = time_nanos(sm.clock)
 
             value = getfield(sm.properties, name)
             response = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
@@ -88,13 +85,11 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Properties},
     end
 end
 
-# Default Handler for all events that aren't handled
+# Default Handler for all events that aren't handled. This function may allocate as the event is not known at compile time
+# Implement a specific handler for each event to avoid allocations
 @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Top}, Val(event::Symbol), message)
-
     # Check if the event is a property
     if event in propertynames(sm.properties)
-        @warn "Default on_event!($(val(state)), $event). Handler may allocate."
-
         if Event.format(message) == Event.Format.NOTHING
             # If the message has no value, then it is a request for the current value
             value = getfield(sm.properties, event)
@@ -103,12 +98,12 @@ end
             # Otherwise it's a write request
             _, value = message(property_type(sm, event))
             setfield!(sm.properties, event, value)
-            # send_event_response(sm, message, prop)
+            # Acknowledge message?
         end
         return Hsm.EventHandled
     end
 
-    # Defer to the specific handler if it exists
+    # Defer to the ancestor handler
     return Hsm.EventNotHandled
 end
 
@@ -117,7 +112,6 @@ end
 Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Ready}) = Hsm.transition!(sm, :Stopped)
 
 function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Ready})
-
     output_stream_uri = get(ENV, "PUB_DATA_URI_1") do
         error("Environment variable PUB_DATA_URI_1 not found")
     end
@@ -146,14 +140,22 @@ end
 # Default handler for all events in Stopped state, will defer to the specific handler if it exists
 # This will always allocate as the event is not known at compile time
 # @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Stopped}, Val(event::Symbol), message)
-#     @warn "Default on_event!($(val(state)), $event). Handler may allocate."
-#     prop = getfield(sm.properties, event)
-#     if Event.format(message) == Event.Format.NOTHING
-#         send_event_response(sm, message, prop)
-#     else
-#         _, value = message(typeof(prop))
-#         setfield!(sm.properties, event, value)
+# Check if the event is a property
+#     if event in propertynames(sm.properties)
+#         if Event.format(message) == Event.Format.NOTHING
+#             # If the message has no value, then it is a request for the current value
+#             value = getfield(sm.properties, event)
+#             send_event_response(sm, message, value)
+#         else
+#             # Otherwise it's a write request
+#             _, value = message(property_type(sm, event))
+#             setfield!(sm.properties, event, value)
+#             # send_event_response(sm, message, prop)
+#         end
+#         return Hsm.EventHandled
 #     end
+
+#     # # Defer to the ancestor handler
 #     return Hsm.EventNotHandled
 # end
 
@@ -246,6 +248,7 @@ function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Processing})
     AndorSDK2.pre_amp_gain!(sm.properties.PreAmpGainIndex)
     AndorSDK2.vss_speed!(sm.properties.VerticalShiftSpeedIndex)
     AndorSDK2.vs_amplitude!(sm.properties.VerticalShiftAmplitudeIndex)
+    AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.T(sm.properties.TriggerSource))
 
     # Read the current values from the camera
     sm.properties.HorizontalShiftSpeed = AndorSDK2.hss_speed(0, 0, 0)
@@ -254,7 +257,7 @@ function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Processing})
     sm.properties.Shutter = Integer(AndorSDK2.ShutterMode.OPEN)
     sm.properties.DeviceTemperature, _ = AndorSDK2.temperature()
 
-    AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.OPEN, 50, 50)
+    AndorSDK2.shutter!(AndorSDK2.ShutterSignalType.ACTIVE_HIGH, AndorSDK2.ShutterMode.T(sm.properties.Shutter), 50, 50)
     AndorSDK2.start_acquisition()
 end
 
@@ -269,10 +272,10 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Processing}, ::Val{:Stop}, _) = Hs
 ########################
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRING}, _)
+    timestamp = time_nanos(sm.clock)
     if AndorSDK2.most_recent_image(sm.frame_buffer)
         # Read the image from the camera. The image should be written directly to the SBE message
         # or sent as a vector of buffers to offer
-        timestamp = clock_gettime(uv_clock_id.REALTIME)
         resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
         message = Tensor.TensorMessageEncoder(sm.buf, Tensor.MessageHeader(sm.buf))
         header = Tensor.header(message)

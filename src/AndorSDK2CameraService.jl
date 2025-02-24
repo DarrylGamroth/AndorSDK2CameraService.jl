@@ -13,16 +13,17 @@ end
 
 using Aeron
 using Agent
+using Clocks
 using EnumX
 using Hsm
 using SnowflakeId
 using SpidersFragmentFilters
 using SpidersMessageCodecs
 using StaticArrays
+using SymbolConverters
 using UnsafeArrays
 using ValSplit
 
-include("uvclockgetttime.jl")
 include("controlagent.jl")
 
 ENV["STATUS_URI"] = "aeron:udp?endpoint=localhost:40123"
@@ -41,12 +42,6 @@ ENV["BLOCK_ID"] = "367"
 
 ENV["CAMERA_INDEX"] = "1"
 
-ENV["WIDTH"] = "128"
-ENV["HEIGHT"] = "128"
-ENV["OFFSET_X"] = "0"
-ENV["OFFSET_Y"] = "0"
-ENV["BINNING_HORIZONTAL"] = "1"
-ENV["BINNING_VERTICAL"] = "1"
 ENV["EXPOSURE_TIME"] = "0.0039"
 
 Base.exit_on_sigint(false)

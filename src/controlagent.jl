@@ -34,28 +34,29 @@ end
 # Just set the values here for now
 @kwdef mutable struct Properties
     Name::String
-    SensorWidth::Union{Nothing,Int} = nothing
-    SensorHeight::Union{Nothing,Int} = nothing
-    BinningHorizontal::Int = parse(Int, get(ENV, "BINNING_HORIZONTAL", "1"))
-    BinningVertical::Int = parse(Int, get(ENV, "BINNING_VERTICAL", "1"))
-    OffsetX::Int = parse(Int, get(ENV, "OFFSET_X", "0"))
-    OffsetY::Int = parse(Int, get(ENV, "OFFSET_Y", "0"))
-    Width::Union{Nothing,Int} = parse(Int, get(ENV, "WIDTH", "128"))
-    Height::Union{Nothing,Int} = parse(Int, get(ENV, "HEIGHT", "128"))
-    ExposureTime::Union{Nothing,Float64} = parse(Float64, get(ENV, "EXPOSURE_TIME", "0.02"))
-    AcquisitionFrameRate::Union{Nothing,Float64} = 0.0 # Setting to 0 so the ExposureTime
+    SensorWidth::Union{Nothing,Int64} = nothing
+    SensorHeight::Union{Nothing,Int64} = nothing
+    BinningHorizontal::Int64 = parse(Int64, get(ENV, "BINNING_HORIZONTAL", "1"))
+    BinningVertical::Int64 = parse(Int64, get(ENV, "BINNING_VERTICAL", "1"))
+    OffsetX::Int64 = parse(Int64, get(ENV, "OFFSET_X", "0"))
+    OffsetY::Int64 = parse(Int64, get(ENV, "OFFSET_Y", "0"))
+    Width::Union{Nothing,Int64} = parse(Int64, get(ENV, "WIDTH", "128"))
+    Height::Union{Nothing,Int64} = parse(Int64, get(ENV, "HEIGHT", "128"))
+    ExposureTime::Union{Nothing,Float64} = parse(Float64, get(ENV, "EXPOSURE_TIME", "0.01"))
+    AcquisitionFrameRate::Union{Nothing,Float64} = 0.0
 
-    Shutter::Int = Integer(AndorSDK2.ShutterMode.CLOSED)
+    TriggerSource::Int64 = Integer(AndorSDK2.TriggerMode.EXTERNAL)
+    Shutter::Int64 = Integer(AndorSDK2.ShutterMode.OPEN)
 
     DeviceAcquisitionFrameRate::Float64 = 0.0
     DeviceCoolingEnable::Bool = false
     DeviceCoolingSetpoint::Float64 = -45.0
-    DeviceCoolingStatus::Int = 0
+    DeviceCoolingStatus::Int64 = 0
     DeviceExposureTime::Float64 = 0.0
-    DeviceFanMode::Int = 2
+    DeviceFanMode::Int64 = 2
     DeviceModelName::Union{Nothing,AbstractString} = nothing
     DeviceSerialNumber::Union{Nothing,AbstractString} = nothing
-    DeviceTemperature::Int = 0
+    DeviceTemperature::Int64 = 0
 
     EMCCDGain::Union{Nothing,Float64} = 1.0
     EMAdvanced::Bool = false
@@ -64,16 +65,16 @@ end
     HorizontalShiftSpeed::Float64 = 0.0
     VerticalShiftSpeed::Float64 = 0.0
 
-    PreAmpGainIndex::Int = 0
-    VerticalShiftSpeedIndex::Int = 0
-    VerticalShiftAmplitudeIndex::Int = 0
+    PreAmpGainIndex::Int64 = 0
+    VerticalShiftSpeedIndex::Int64 = 0
+    VerticalShiftAmplitudeIndex::Int64 = 0
 end
 
 mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     client::Aeron.Client
     properties::Properties
-
-    id_gen::SnowflakeId.SnowflakeIdGenerator
+    clock::EpochClock
+    id_gen::SnowflakeIdGenerator
 
     # SBE fields
     sbe_position_ptr::Base.RefValue{Int64}
@@ -96,89 +97,85 @@ mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     current::Hsm.StateType
     source::Hsm.StateType
 
-    ControlStateMachine(client, name) = new(client, Properties(; Name=name))
+    ControlStateMachine(client, name) = new(client, Properties(; Name=name), EpochClock())
 end
 
 function all_properties_set(sm::ControlStateMachine)
     return all(!isnothing(getfield(sm.properties, field)) for field in fieldnames(Properties))
 end
 
-function property_type(sm::ControlStateMachine, property)
-    return typeof(getfield(sm.properties, property))
-end
+property_type(sm::ControlStateMachine, name) = typeof(getfield(sm.properties, name))
+property_type(sm::ControlStateMachine, ::Val{T}) where {T} = typeof(getfield(sm.properties, T))
+
 
 Agent.name(sm::ControlStateMachine) = sm.properties.Name
 
 function Agent.on_start(sm::ControlStateMachine)
     @info "Starting agent $(Agent.name(sm))"
-    try
-        sm.sbe_position_ptr = Ref(0)
-        sm.buf = zeros(UInt8, 1024)
-        sm.frame_buffer = UInt16[]
 
-        node_id = parse(Int, get(ENV, "BLOCK_ID") do
-            error("Environment variable BLOCK_ID not found")
-        end)
+    sm.sbe_position_ptr = Ref(0)
+    sm.buf = zeros(UInt8, 1024)
+    sm.frame_buffer = UInt16[]
 
-        sm.id_gen = SnowflakeId.SnowflakeIdGenerator(node_id)
+    node_id = parse(Int, get(ENV, "BLOCK_ID") do
+        error("Environment variable BLOCK_ID not found")
+    end)
 
-        # Get configuration from environment variables
-        status_uri = get(ENV, "STATUS_URI") do
-            error("Environment variable STATUS_URI not found")
-        end
+    sm.id_gen = SnowflakeIdGenerator(node_id)
 
-        status_stream_id = parse(Int, get(ENV, "STATUS_STREAM_ID") do
-            error("Environment variable STATUS_STREAM_ID not found")
-        end)
-
-        # Publication for status messages
-        sm.status_stream = Aeron.add_publication(sm.client, status_uri, status_stream_id)
-
-        control_uri = get(ENV, "CONTROL_URI") do
-            error("Environment variable CONTROL_URI not found")
-        end
-
-        control_stream_id = parse(Int, get(ENV, "CONTROL_STREAM_ID") do
-            error("Environment variable CONTROL_STREAM_ID not found")
-        end)
-
-        sm.control_stream = Aeron.add_subscription(sm.client, control_uri, control_stream_id)
-
-        fragment_handler = Aeron.FragmentHandler(control_handler, sm)
-
-        if haskey(ENV, "CONTROL_STREAM_FILTER")
-            message_filter = SpidersEventTagFragmentFilter(fragment_handler, ENV["CONTROL_STREAM_FILTER"])
-            sm.control_fragment_handler = Aeron.FragmentAssembler(message_filter)
-        else
-            sm.control_fragment_handler = Aeron.FragmentAssembler(fragment_handler)
-        end
-
-        sm.input_fragment_handler = Aeron.FragmentAssembler(Aeron.FragmentHandler(data_handler, sm))
-
-        # # Subscribe to all data streams
-        i = 1
-        sm.input_streams = Vector{Aeron.Subscription}(undef, 0)
-        while haskey(ENV, "SUB_DATA_URI_$i")
-            uri = ENV["SUB_DATA_URI_$i"]
-            stream_id = parse(Int, get(ENV, "SUB_DATA_STREAM_$i") do
-                error("Environment variable SUB_DATA_STREAM_$i not found")
-            end)
-            subscription = Aeron.add_subscription(sm.client, uri, stream_id)
-            push!(sm.input_streams, subscription)
-            i += 1
-        end
-
-        # Initialize the camera
-
-        # Default to the first camera
-        camera_index = parse(Int, get(ENV, "CAMERA_INDEX", "1"))
-        initialize_camera(sm, camera_index)
-
-        Hsm.initialize!(sm)
-
-    catch e
-        @error "Error starting agent $(Agent.name(sm)). Exception caught:" exception = (e, catch_backtrace())
+    # Get configuration from environment variables
+    status_uri = get(ENV, "STATUS_URI") do
+        error("Environment variable STATUS_URI not found")
     end
+
+    status_stream_id = parse(Int, get(ENV, "STATUS_STREAM_ID") do
+        error("Environment variable STATUS_STREAM_ID not found")
+    end)
+
+    # Publication for status messages
+    sm.status_stream = Aeron.add_publication(sm.client, status_uri, status_stream_id)
+
+    control_uri = get(ENV, "CONTROL_URI") do
+        error("Environment variable CONTROL_URI not found")
+    end
+
+    control_stream_id = parse(Int, get(ENV, "CONTROL_STREAM_ID") do
+        error("Environment variable CONTROL_STREAM_ID not found")
+    end)
+
+    sm.control_stream = Aeron.add_subscription(sm.client, control_uri, control_stream_id)
+
+    fragment_handler = Aeron.FragmentHandler(control_handler, sm)
+
+    if haskey(ENV, "CONTROL_STREAM_FILTER")
+        message_filter = SpidersEventTagFragmentFilter(fragment_handler, ENV["CONTROL_STREAM_FILTER"])
+        sm.control_fragment_handler = Aeron.FragmentAssembler(message_filter)
+    else
+        sm.control_fragment_handler = Aeron.FragmentAssembler(fragment_handler)
+    end
+
+    sm.input_fragment_handler = Aeron.FragmentAssembler(Aeron.FragmentHandler(data_handler, sm))
+
+    # # Subscribe to all data streams
+    i = 1
+    sm.input_streams = Vector{Aeron.Subscription}(undef, 0)
+    while haskey(ENV, "SUB_DATA_URI_$i")
+        uri = ENV["SUB_DATA_URI_$i"]
+        stream_id = parse(Int, get(ENV, "SUB_DATA_STREAM_$i") do
+            error("Environment variable SUB_DATA_STREAM_$i not found")
+        end)
+        subscription = Aeron.add_subscription(sm.client, uri, stream_id)
+        push!(sm.input_streams, subscription)
+        i += 1
+    end
+
+    # Initialize the camera
+
+    # Default to the first camera
+    camera_index = parse(Int, get(ENV, "CAMERA_INDEX", "1"))
+    initialize_camera(sm, camera_index)
+
+    Hsm.initialize!(sm)
 end
 
 function Agent.on_close(sm::ControlStateMachine)
@@ -193,7 +190,7 @@ function Agent.on_close(sm::ControlStateMachine)
 end
 
 function Agent.on_error(sm::ControlStateMachine, error)
-    timestamp = clock_gettime(uv_clock_id.REALTIME)
+    timestamp = time_nanos(sm.clock)
 
     message = Event.EventMessageEncoder(agent.buf, agent.sbe_position_ptr, Event.MessageHeader(agent.buf))
     header = Event.header(message)
@@ -206,13 +203,14 @@ function Agent.on_error(sm::ControlStateMachine, error)
     Aeron.offer(agent.status_stream, convert(AbstractArray{UInt8}, message))
 
     @error "Error in agent $(Agent.name(sm)): $error" exception = (error, catch_backtrace())
-
-    throw(error)
 end
 
 const DEFAULT_FRAGMENT_COUNT_LIMIT = 10
 function Agent.do_work(sm::ControlStateMachine)
     work_count = 0
+
+    # Poll for camera events
+    work_count += poll_camera(sm)
 
     # Read input from data streams until no more fragments are available
     while true
@@ -221,10 +219,10 @@ function Agent.do_work(sm::ControlStateMachine)
 
         for subscription in sm.input_streams
             fragments_read = Aeron.poll(subscription, input_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
-            work_count += fragments_read
             if fragments_read > 0
                 all_streams_empty = false
             end
+            work_count += fragments_read
         end
         if all_streams_empty
             break
@@ -233,9 +231,6 @@ function Agent.do_work(sm::ControlStateMachine)
 
     # Process control messages
     work_count += Aeron.poll(sm.control_stream, sm.control_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
-
-    # Poll for camera events
-    work_count += poll_camera(sm)
 
     return work_count
 end
@@ -251,7 +246,7 @@ end
 
 # These two functions will be combined once SpidersMessageCodecs is updated
 function on_state_changed(sm::ControlStateMachine, message::Event.EventMessage)
-    timestamp = clock_gettime(uv_clock_id.REALTIME)
+    timestamp = time_nanos(sm.clock)
 
     state_message = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
     header = Event.header(state_message)
@@ -266,7 +261,7 @@ function on_state_changed(sm::ControlStateMachine, message::Event.EventMessage)
 end
 
 function on_state_changed(sm::ControlStateMachine, message::Tensor.TensorMessage)
-    timestamp = clock_gettime(uv_clock_id.REALTIME)
+    timestamp = time_nanos(sm.clock)
 
     state_message = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
     header = Event.header(state_message)
@@ -346,7 +341,6 @@ function initialize_camera(sm::ControlStateMachine, camera_index)
     sm.properties.DeviceModelName = AndorSDK2.head_model()
     sm.properties.DeviceSerialNumber = string(AndorSDK2.camera_serial_number())
     sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
-    AndorSDK2.trigger_mode!(AndorSDK2.TriggerMode.EXTERNAL)
     AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
     AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
     AndorSDK2.dma_parameters!(1, 0.001)
