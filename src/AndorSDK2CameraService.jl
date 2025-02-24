@@ -1,4 +1,3 @@
-#! /usr/bin/env julia
 module AndorSDK2CameraService
 
 # include("../../Hsm.jl/src/Hsm.jl")
@@ -25,27 +24,6 @@ using UnsafeArrays
 using ValSplit
 
 include("controlagent.jl")
-
-ENV["STATUS_URI"] = "aeron:udp?endpoint=localhost:40123"
-ENV["STATUS_STREAM_ID"] = "1"
-
-ENV["CONTROL_URI"] = "aeron:udp?endpoint=0.0.0.0:40123"
-ENV["CONTROL_STREAM_ID"] = "2"
-ENV["CONTROL_STREAM_FILTER"] = "Camera"
-
-ENV["PUB_DATA_URI_1"] = "aeron:udp?endpoint=132.246.192.209:40123"
-ENV["PUB_DATA_STREAM_1"] = "3"
-
-ENV["BLOCK_NAME"] = "Camera"
-
-ENV["BLOCK_ID"] = "367"
-
-ENV["CAMERA_INDEX"] = "1"
-
-ENV["EXPOSURE_TIME"] = "0.0039"
-
-ENV["BINNING_HORIZONTAL"] = 2
-ENV["BINNING_VERTICAL"] = 2
 
 Base.exit_on_sigint(false)
 
@@ -108,10 +86,3 @@ function try_claim(p, length, max_attempts=10)
     end
 end
 end # module AndorSDK2CameraService
-
-using .AndorSDK2CameraService
-const main = AndorSDK2CameraService.main
-
-@isdefined(var"@main") ? (@main) : exit(main(ARGS))
-
-# end # module AndorSDK2CameraService
