@@ -110,7 +110,6 @@ end
 property_type(sm::ControlStateMachine, name) = typeof(getfield(sm.properties, name))
 property_type(sm::ControlStateMachine, ::Val{T}) where {T} = typeof(getfield(sm.properties, T))
 
-
 Agent.name(sm::ControlStateMachine) = sm.properties.Name
 
 function Agent.on_start(sm::ControlStateMachine)
@@ -184,6 +183,7 @@ end
 
 function Agent.on_close(sm::ControlStateMachine)
     @info "Closing agent $(Agent.name(sm))"
+
     AndorSDK2.shutdown()
 
     close(sm.status_stream)
@@ -239,15 +239,6 @@ function Agent.do_work(sm::ControlStateMachine)
     return work_count
 end
 
-# FIXME This might need to be rethought. Sending a empty message will perform a read
-# and send a reply, this is a write event acknowledgement
-function acknowledge_message(sm::ControlStateMachine, message::Event.EventMessage)
-    # FIXME: try_claim could be used here but it currently doesn't work
-    if Hsm.current(sm) != :Error
-        offer(sm.status_stream, convert(AbstractArray{UInt8}, message))
-    end
-end
-
 # These two functions will be combined once SpidersMessageCodecs is updated
 function on_state_changed(sm::ControlStateMachine, message::Event.EventMessage)
     timestamp = time_nanos(sm.clock)
@@ -287,9 +278,7 @@ function control_handler(sm::ControlStateMachine, buffer, _)
         message = Event.EventMessageDecoder(buffer, offset, sm.sbe_position_ptr, sbe_header)
         event = Event.key(Symbol, message)
 
-        if dispatch!(sm, event, message) == Hsm.EventHandled
-            acknowledge_message(sm, message)
-        end
+        dispatch!(sm, event, message)
 
         offset += Event.sbe_decoded_length(message) + Event.sbe_encoded_length(sbe_header)
     end
@@ -308,13 +297,11 @@ function dispatch!(sm::ControlStateMachine, event::Hsm.EventType, message)
     try
         prev = Hsm.current(sm)
 
-        handled = Hsm.dispatch!(sm, event, message)
+        Hsm.dispatch!(sm, event, message)
 
         if prev != Hsm.current(sm)
             on_state_changed(sm, message)
         end
-
-        return handled
     catch e
         if e isa AgentTerminationException
             throw(e)

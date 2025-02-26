@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set the environment variables
-export JULIA_NUM_THREADS=3
+export JULIA_NUM_THREADS=auto
 export JULIA_PROJECT=@.
 export STATUS_URI="aeron:udp?endpoint=localhost:40123"
 export STATUS_STREAM_ID=1

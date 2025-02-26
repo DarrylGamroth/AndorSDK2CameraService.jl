@@ -137,42 +137,6 @@ end
 
 ########################
 
-# Default handler for all events in Stopped state, will defer to the specific handler if it exists
-# This will always allocate as the event is not known at compile time
-# @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Stopped}, Val(event::Symbol), message)
-# Check if the event is a property
-#     if event in propertynames(sm.properties)
-#         if Event.format(message) == Event.Format.NOTHING
-#             # If the message has no value, then it is a request for the current value
-#             value = getfield(sm.properties, event)
-#             send_event_response(sm, message, value)
-#         else
-#             # Otherwise it's a write request
-#             _, value = message(property_type(sm, event))
-#             setfield!(sm.properties, event, value)
-#             # send_event_response(sm, message, prop)
-#         end
-#         return Hsm.EventHandled
-#     end
-
-#     # # Defer to the ancestor handler
-#     return Hsm.EventNotHandled
-# end
-
-# A specific handler is allocation free
-# function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Stopped}, event::Val{:EMCCDGain}, message)
-#     @info "on_event!($(val(state)), $(val(event)))"
-#     sym = val(event)
-#     prop = getfield(sm.properties, sym)
-#     if Event.format(message) == Event.Format.NOTHING
-#         send_event_response(sm, message, prop)
-#     else
-#         _, value = message(typeof(prop))
-#         setfield!(sm.properties, sym, value)
-#     end
-#     return Hsm.EventHandled
-# end
-
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Stopped}, ::Val{:Play}, _)
     # Only transition if all properties are set
     if all_properties_set(sm)
