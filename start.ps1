@@ -1,5 +1,5 @@
 # Set the environment variables
-$env:JULIA_NUM_THREADS = auto
+$env:JULIA_NUM_THREADS = "auto"
 $env:JULIA_PROJECT = "@."
 $env:STATUS_URI = "aeron:udp?endpoint=localhost:40123"
 $env:STATUS_STREAM_ID = 1

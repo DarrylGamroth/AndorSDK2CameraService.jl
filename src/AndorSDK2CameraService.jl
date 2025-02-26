@@ -39,7 +39,7 @@ function main(ARGS)
 
         # Start the agent
         runner = AgentRunner(BackoffIdleStrategy(), agent)
-        Agent.start_on_thread(runner, 2)
+        Agent.start_on_thread(runner)
 
         wait(runner)
     catch e
