@@ -21,17 +21,15 @@ Base.convert(::Type{T}, ::Val{S}) where {T<:AbstractString,S} = convert(Abstract
 val(::Val{T}) where {T} = T
 
 function send_event_response(sm::ControlStateMachine, message::Event.EventMessage, value)
-    timestamp = time_nanos(sm.clock)
-
     response = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
     header = Event.header(response)
 
-    Event.timestampNs!(header, timestamp)
+    Event.timestampNs!(header, sm.now)
     Event.correlationId!(header, message |> Event.header |> Event.correlationId)
     Event.tag!(header, Agent.name(sm))
 
     response(Event.key(String, message), value)
-    Aeron.offer(sm.status_stream, convert(AbstractArray{UInt8}, response))
+    offer(sm.status_stream, convert(AbstractArray{UInt8}, response))
 end
 
 ########################
@@ -63,29 +61,36 @@ end
 Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Exit}, _) = Hsm.transition!(sm, :Exit)
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Top}, ::Val{:Properties}, message)
-    # FIXME Post read events to the event queue for each property to be processed by the state machine
+    # FIXME Post read events to an event queue for each property to be processed by the state machine
+    # but we need to record the correlation id of the original message for the response
     if Event.format(message) == Event.Format.NOTHING
         for name in propertynames(sm.properties)
-            timestamp = time_nanos(sm.clock)
-
             value = getfield(sm.properties, name)
             response = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
             header = Event.header(response)
 
-            Event.timestampNs!(header, timestamp)
+            Event.timestampNs!(header, sm.now)
             Event.correlationId!(header, message |> Event.header |> Event.correlationId)
             Event.tag!(header, Agent.name(sm))
 
             response(convert(String, name), value)
-            Aeron.offer(sm.status_stream, convert(AbstractArray{UInt8}, response))
+            offer(sm.status_stream, convert(AbstractArray{UInt8}, response))
         end
+        # for name in propertynames(sm.properties)
+        #     event = Event.EventMessageEncoder(sm.buf, sm.sbe_position_ptr, Event.MessageHeader(sm.buf))
+        #     Event.correlationId!(header, message |> Event.header |> Event.correlationId)
+        #     event(convert(String, name), nothing)
+        #     # Copy the buffer into a queue to be processed by the state machine
+        #     # The buffer needs to be large enough to hold messages for all the properties
+        #     # write(sm.status_stream, convert(AbstractArray{UInt8}, response))
+        # end
         return Hsm.EventHandled
     else
         return Hsm.transition!(sm, :Error)
     end
 end
 
-# Default Handler for all events that aren't handled. This function may allocate as the event is not known at compile time
+# Default handler not handled events. This function may allocate as the event is not known at compile time
 # Implement a specific handler for each event to avoid allocations
 @valsplit function Hsm.on_event!(sm::ControlStateMachine, state::Val{:Top}, Val(event::Symbol), message)
     # Check if the event is a property
@@ -97,8 +102,13 @@ end
         else
             # Otherwise it's a write request
             _, value = message(property_type(sm, event))
-            setfield!(sm.properties, event, value)
+            if isbits(value)
+                setfield!(sm.properties, event, value)
+            else
+                copyto!(getfield(sm.properties, event), value)
+            end
             # Acknowledge message?
+            send_event_response(sm, message, value)
         end
         return Hsm.EventHandled
     end
@@ -112,6 +122,27 @@ end
 Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Ready}) = Hsm.transition!(sm, :Stopped)
 
 function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Ready})
+    # Default to the first camera
+    camera_index = parse(Int, get(ENV, "CAMERA_INDEX", "1"))
+
+    if camera_index > AndorSDK2.available_cameras()
+        throw(ArgumentError("Camera index $camera_index is out of range"))
+    end
+
+    AndorSDK2.current_camera!(camera_index - 1)
+
+    AndorSDK2.initialize()
+
+    sm.properties.DeviceModelName = AndorSDK2.head_model()
+    sm.properties.DeviceSerialNumber = string(AndorSDK2.camera_serial_number())
+    sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
+    AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
+    AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
+    AndorSDK2.dma_parameters!(1, 0.001)
+
+    # Enable camera polling
+    sm.enable_camera_poll = true
+
     output_stream_uri = get(ENV, "PUB_DATA_URI_1") do
         error("Environment variable PUB_DATA_URI_1 not found")
     end
@@ -132,6 +163,9 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Ready}, ::Val{:TEMPCYCLE}
 end
 
 function Hsm.on_exit!(sm::ControlStateMachine, ::Val{:Ready})
+    # Disable camera polling
+    sm.enable_camera_poll = false
+    AndorSDK2.shutdown()
     close(sm.output_stream)
 end
 
@@ -193,7 +227,8 @@ end
 Hsm.on_initial!(sm::ControlStateMachine, ::Val{:Processing}) = Hsm.transition!(sm, :Paused)
 
 function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Processing})
-
+    
+    sm.frame_index = -1
     resize!(sm.frame_buffer, sm.properties.Width ÷ sm.properties.BinningHorizontal *
                              sm.properties.Height ÷ sm.properties.BinningVertical)
     AndorSDK2.image!(sm.properties.BinningHorizontal,
@@ -238,16 +273,15 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Processing}, ::Val{:Stop}, _) = Hs
 ########################
 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRING}, _)
-    timestamp = time_nanos(sm.clock)
     _, last = AndorSDK2.number_new_images()
-    if last != sm.frame_index
+    if last > sm.frame_index
         sm.frame_index, _, _ = AndorSDK2.images(last, last, sm.frame_buffer)
         # Read the image from the camera. The image should be written directly to the SBE message
         # or sent as a vector of buffers to offer
         resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
         message = Tensor.TensorMessageEncoder(sm.buf, Tensor.MessageHeader(sm.buf))
         header = Tensor.header(message)
-        Tensor.timestampNs!(header, timestamp)
+        Tensor.timestampNs!(header, sm.now)
         Tensor.correlationId!(header, next_id(sm.id_gen))
         Tensor.tag!(String, header, Agent.name(sm))
         message(reshape(sm.frame_buffer,
@@ -273,7 +307,7 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:SPOOL_ERROR}, _) 
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:ACQUIRING}, _)
     # Just consume the image
     _, last = AndorSDK2.number_new_images()
-    if last != sm.frame_index
+    if last > sm.frame_index
         sm.frame_index, _, _ = AndorSDK2.images(last, last, sm.frame_buffer)
     end
     return Hsm.EventHandled
@@ -294,4 +328,3 @@ end
 function Hsm.on_entry!(sm::ControlStateMachine, ::Val{:Error})
     @info "Error"
 end
-

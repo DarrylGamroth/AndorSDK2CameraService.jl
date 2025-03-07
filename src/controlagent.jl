@@ -74,11 +74,22 @@ mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     client::Aeron.Client
     properties::Properties
     clock::EpochClock
-    id_gen::SnowflakeIdGenerator
+    cached_clock::CachedEpochClock
 
     # SBE fields
     sbe_position_ptr::Base.RefValue{Int64}
     buf::Vector{UInt8}
+
+    frame_buffer::Vector{UInt16}
+    frame_index::Clong
+
+    # time
+    now::Int64
+
+    enable_camera_poll::Bool
+
+    # ID generator
+    id_gen::SnowflakeIdGenerator
 
     # Aeron streams
     status_stream::Aeron.Publication
@@ -90,17 +101,20 @@ mutable struct ControlStateMachine <: Hsm.AbstractHsmStateMachine
     control_fragment_handler::Aeron.FragmentAssembler
     input_fragment_handler::Aeron.FragmentAssembler
 
-    # Camera
-    frame_buffer::Vector{UInt16}
-
     # State variables
     current::Hsm.StateType
     source::Hsm.StateType
 
-    # Frame index
-    frame_index::Clong
-
-    ControlStateMachine(client, name) = new(client, Properties(; Name=name), EpochClock())
+    ControlStateMachine(client, name) = new(client,
+        Properties(; Name=name),
+        EpochClock(),
+        CachedEpochClock(),
+        Ref(0),
+        zeros(UInt8, 1024),
+        UInt16[],
+        -1,
+        0,
+        false)
 end
 
 function all_properties_set(sm::ControlStateMachine)
@@ -115,16 +129,11 @@ Agent.name(sm::ControlStateMachine) = sm.properties.Name
 function Agent.on_start(sm::ControlStateMachine)
     @info "Starting agent $(Agent.name(sm))"
 
-    sm.sbe_position_ptr = Ref(0)
-    sm.buf = zeros(UInt8, 1024)
-    sm.frame_buffer = UInt16[]
-    sm.frame_index = -1
-
     node_id = parse(Int, get(ENV, "BLOCK_ID") do
         error("Environment variable BLOCK_ID not found")
     end)
 
-    sm.id_gen = SnowflakeIdGenerator(node_id)
+    sm.id_gen = SnowflakeIdGenerator(node_id, sm.cached_clock)
 
     # Get configuration from environment variables
     status_uri = get(ENV, "STATUS_URI") do
@@ -172,19 +181,11 @@ function Agent.on_start(sm::ControlStateMachine)
         i += 1
     end
 
-    # Initialize the camera
-
-    # Default to the first camera
-    camera_index = parse(Int, get(ENV, "CAMERA_INDEX", "1"))
-    initialize_camera(sm, camera_index)
-
     Hsm.initialize!(sm)
 end
 
 function Agent.on_close(sm::ControlStateMachine)
     @info "Closing agent $(Agent.name(sm))"
-
-    AndorSDK2.shutdown()
 
     close(sm.status_stream)
     close(sm.control_stream)
@@ -194,29 +195,32 @@ function Agent.on_close(sm::ControlStateMachine)
 end
 
 function Agent.on_error(sm::ControlStateMachine, error)
-    timestamp = time_nanos(sm.clock)
-
     message = Event.EventMessageEncoder(agent.buf, agent.sbe_position_ptr, Event.MessageHeader(agent.buf))
     header = Event.header(message)
 
-    Event.timestampNs!(header, timestamp)
+    Event.timestampNs!(header, sm.now)
     Event.correlationId!(header, next_id(sm.id_gen))
     Event.tag!(header, Agent.name(agent))
     message("Error", "$error")
 
-    Aeron.offer(agent.status_stream, convert(AbstractArray{UInt8}, message))
+    offer(agent.status_stream, convert(AbstractArray{UInt8}, message))
 
     @error "Error in agent $(Agent.name(sm)): $error" exception = (error, catch_backtrace())
 end
 
-const DEFAULT_FRAGMENT_COUNT_LIMIT = 10
 function Agent.do_work(sm::ControlStateMachine)
+    sm.now = time_nanos(sm.clock)
+    update!(sm.cached_clock, sm.now)
+
     work_count = 0
 
-    # Poll for camera events
-    work_count += poll_camera(sm)
+    work_count += camera_poller(sm)
+    work_count += sub_data_stream_poller(sm)
+    work_count += control_poller(sm)
+end
 
-    # Read input from data streams until no more fragments are available
+function sub_data_stream_poller(sm::ControlStateMachine)
+    work_count = 0
     while true
         all_streams_empty = true
         input_fragment_handler = sm.input_fragment_handler
@@ -232,11 +236,11 @@ function Agent.do_work(sm::ControlStateMachine)
             break
         end
     end
-
-    # Process control messages
-    work_count += Aeron.poll(sm.control_stream, sm.control_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
-
     return work_count
+end
+
+function control_poller(sm::ControlStateMachine)
+    Aeron.poll(sm.control_stream, sm.control_fragment_handler, DEFAULT_FRAGMENT_COUNT_LIMIT)
 end
 
 # These two functions will be combined once SpidersMessageCodecs is updated
@@ -252,7 +256,7 @@ function on_state_changed(sm::ControlStateMachine, message::Event.EventMessage)
 
     state_message("StateChange", Hsm.current(sm))
 
-    Aeron.offer(sm.status_stream, convert(AbstractArray{UInt8}, state_message))
+    offer(sm.status_stream, convert(AbstractArray{UInt8}, state_message))
 end
 
 function on_state_changed(sm::ControlStateMachine, message::Tensor.TensorMessage)
@@ -267,7 +271,7 @@ function on_state_changed(sm::ControlStateMachine, message::Tensor.TensorMessage
 
     state_message("StateChange", Hsm.current(sm))
 
-    Aeron.offer(sm.status_stream, convert(AbstractArray{UInt8}, state_message))
+    offer(sm.status_stream, convert(AbstractArray{UInt8}, state_message))
 end
 
 function control_handler(sm::ControlStateMachine, buffer, _)
@@ -313,28 +317,13 @@ function dispatch!(sm::ControlStateMachine, event::Hsm.EventType, message)
     end
 end
 
-function poll_camera(sm::ControlStateMachine)
+function camera_poller(sm::ControlStateMachine)
+    if !sm.enable_camera_poll
+        return 0
+    end
+
     status = AndorSDK2.status()
     dispatch!(sm, Symbol(status), nothing)
     # No work is done in IDLE
-    return Integer(status != AndorSDK2.Status.IDLE)
+    return Int64(status != AndorSDK2.Status.IDLE)
 end
-
-function initialize_camera(sm::ControlStateMachine, camera_index)
-    if camera_index > AndorSDK2.available_cameras()
-        throw(ArgumentError("Camera index $camera_index is out of range"))
-    end
-
-    AndorSDK2.current_camera!(camera_index - 1)
-
-    AndorSDK2.initialize()
-
-    sm.properties.DeviceModelName = AndorSDK2.head_model()
-    sm.properties.DeviceSerialNumber = string(AndorSDK2.camera_serial_number())
-    sm.properties.SensorWidth, sm.properties.SensorHeight = AndorSDK2.detector()
-    AndorSDK2.acquisition_mode!(AndorSDK2.AcquisitionMode.RUN_TILL_ABORT)
-    AndorSDK2.read_mode!(AndorSDK2.ReadMode.IMAGE)
-    AndorSDK2.dma_parameters!(1, 0.001)
-end
-
-include("states.jl")

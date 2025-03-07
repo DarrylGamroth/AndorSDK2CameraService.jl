@@ -23,9 +23,10 @@ using SymbolConverters
 using UnsafeArrays
 using ValSplit
 
-include("controlagent.jl")
+const DEFAULT_FRAGMENT_COUNT_LIMIT = 10
 
-Base.exit_on_sigint(false)
+include("controlagent.jl")
+include("states.jl")
 
 function main(ARGS)
     # md = Aeron.MediaDriver.launch()
