@@ -275,7 +275,7 @@ Hsm.on_event!(sm::ControlStateMachine, ::Val{:Processing}, ::Val{:Stop}, _) = Hs
 function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Playing}, ::Val{:ACQUIRING}, _)
     _, last = AndorSDK2.number_new_images()
     if last > sm.frame_index
-        sm.frame_index, _, _ = AndorSDK2.images(last, last, sm.frame_buffer)
+        _, sm.frame_index, _ = AndorSDK2.images(last, last, sm.frame_buffer)
         # Read the image from the camera. The image should be written directly to the SBE message
         # or sent as a vector of buffers to offer
         resize!(sm.buf, 128 + sizeof(sm.frame_buffer))
@@ -308,7 +308,7 @@ function Hsm.on_event!(sm::ControlStateMachine, ::Val{:Paused}, ::Val{:ACQUIRING
     # Just consume the image
     _, last = AndorSDK2.number_new_images()
     if last > sm.frame_index
-        sm.frame_index, _, _ = AndorSDK2.images(last, last, sm.frame_buffer)
+        _, sm.frame_index, _ = AndorSDK2.images(last, last, sm.frame_buffer)
     end
     return Hsm.EventHandled
 end
